@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: a1_trainer
+      POSTGRES_USER: a1
+      POSTGRES_PASSWORD: a1_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U a1 -d a1_trainer"]
+      interval: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+  # --- Open-source integrations (optional) ---
+
+  argilla:
+    image: argilla/argilla-server:latest
+    ports:
+      - "6900:6900"
+    environment:
+      ARGILLA_AUTH_SECRET_KEY: a1-argilla-dev-secret
+    profiles: ["feedback"]  # docker compose --profile feedback up
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317:4317"    # OTLP gRPC receiver
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    profiles: ["observability"]  # docker compose --profile observability up
+
+volumes:
+  pgdata:
+  ollama_data:
