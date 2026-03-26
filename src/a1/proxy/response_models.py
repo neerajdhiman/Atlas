@@ -53,3 +53,4 @@ class ChatCompletionChunk(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str = ""
     choices: list[StreamChoice] = []
+    usage: Usage | None = None  # populated in final chunk when provider reports it

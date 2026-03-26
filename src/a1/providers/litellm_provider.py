@@ -62,9 +62,11 @@ class LiteLLMProvider(LLMProvider):
     ):
         self.name = name
         self._models = models
-        self._api_key = api_key
+        self._api_key = api_key  # fallback single key from env
         self._api_base = api_base
         self._prefix = PROVIDER_PREFIX_MAP.get(name, "")
+        self._last_account_id = None  # track which key pool account was used
+        self._last_account_name = None
 
     def _litellm_model(self, model: str) -> str:
         """Convert our model name to LiteLLM's expected format."""

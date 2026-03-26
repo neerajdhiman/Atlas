@@ -83,6 +83,12 @@ class RoutingDecision(Base):
     fallback_from: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("routing_decisions.id"), nullable=True
     )
+    is_local: Mapped[bool] = mapped_column(default=False)
+    api_key_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    cache_hit: Mapped[bool] = mapped_column(default=False)
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("provider_accounts.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     message: Mapped[Message] = relationship(back_populates="routing_decision")
@@ -151,8 +157,80 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class ProviderAccount(Base):
+    """Multiple API keys per provider for load balancing and failover."""
+    __tablename__ = "provider_accounts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)  # anthropic, openai, vertex
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    priority: Mapped[int] = mapped_column(Integer, default=0)  # higher = preferred
+    rate_limit_rpm: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    monthly_budget_usd: Mapped[float | None] = mapped_column(Numeric(10, 2), nullable=True)
+    current_month_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), default=0)
+    total_requests: Mapped[int] = mapped_column(Integer, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UsageRecord(Base):
+    """Per-request usage tracking for analytics and billing."""
+    __tablename__ = "usage_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    api_key_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    account_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("provider_accounts.id"), nullable=True
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    is_local: Mapped[bool] = mapped_column(default=False)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    equivalent_external_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    error: Mapped[bool] = mapped_column(default=False)
+    cache_hit: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class UsageHourlyRollup(Base):
+    """Pre-aggregated hourly usage for fast time-series queries."""
+    __tablename__ = "usage_hourly_rollups"
+    __table_args__ = (
+        UniqueConstraint("api_key_hash", "provider", "model", "is_local", "hour"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    is_local: Mapped[bool] = mapped_column(default=False)
+    hour: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    equivalent_external_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    avg_latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    p50_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p95_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p99_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
 # Indexes
 Index("ix_messages_conversation_seq", Message.conversation_id, Message.sequence)
 Index("ix_routing_decisions_created", RoutingDecision.created_at)
 Index("ix_routing_decisions_task_type", RoutingDecision.task_type)
 Index("ix_quality_signals_message", QualitySignal.message_id)
+Index("ix_provider_accounts_provider", ProviderAccount.provider)
+Index("ix_usage_records_created", UsageRecord.created_at)
+Index("ix_usage_records_api_key_created", UsageRecord.api_key_hash, UsageRecord.created_at)
+Index("ix_usage_records_provider_model", UsageRecord.provider, UsageRecord.model)
+Index("ix_usage_hourly_hour", UsageHourlyRollup.hour)

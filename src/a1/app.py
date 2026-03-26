@@ -20,6 +20,10 @@ async def lifespan(app: FastAPI):
     from a1.proxy.cache import init_cache
     init_cache(settings)
 
+    # Load multi-account key pool
+    from a1.providers.key_pool import key_pool
+    await key_pool.load_accounts()
+
     # Register LLM providers
     from a1.providers.registry import provider_registry
     await provider_registry.initialize()

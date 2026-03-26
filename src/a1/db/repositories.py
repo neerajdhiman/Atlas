@@ -68,12 +68,14 @@ class RoutingRepo:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def record(self, message_id: uuid.UUID, provider: str, model: str, strategy: str, task_type: str | None, confidence: float | None, latency_ms: int, prompt_tokens: int, completion_tokens: int, cost_usd: float, error: str | None = None, fallback_from: uuid.UUID | None = None) -> RoutingDecision:
+    async def record(self, message_id: uuid.UUID, provider: str, model: str, strategy: str, task_type: str | None, confidence: float | None, latency_ms: int, prompt_tokens: int, completion_tokens: int, cost_usd: float, error: str | None = None, fallback_from: uuid.UUID | None = None, is_local: bool = False, api_key_hash: str | None = None, cache_hit: bool = False, account_id: uuid.UUID | None = None) -> RoutingDecision:
         decision = RoutingDecision(
             message_id=message_id, provider=provider, model=model, strategy=strategy,
             task_type=task_type, confidence=confidence, latency_ms=latency_ms,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
             cost_usd=cost_usd, error=error, fallback_from=fallback_from,
+            is_local=is_local, api_key_hash=api_key_hash, cache_hit=cache_hit,
+            account_id=account_id,
         )
         self.session.add(decision)
         await self.session.flush()

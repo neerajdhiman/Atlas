@@ -22,8 +22,12 @@ class Settings(BaseSettings):
     vertex_project_id: str = ""
     vertex_location: str = "us-central1"
 
-    # Ollama
-    ollama_base_url: str = "http://localhost:11434"
+    # Ollama (supports multiple servers)
+    ollama_base_url: str = "http://localhost:11434"  # primary server
+    ollama_servers: list[str] = [
+        "http://10.0.0.9:11434",   # alpheric — code models (deepseek-coder, llama3.2)
+        "http://10.0.0.10:11434",  # alpheric.com — QA/reasoning models (codellama, deepseek-r1, mistral)
+    ]
 
     # Proxy auth
     api_keys: list[str] = []  # allowed API keys for proxy access
@@ -70,6 +74,14 @@ class Settings(BaseSettings):
     harness_default_tasks: list[str] = ["mmlu", "hellaswag", "truthfulqa_mc2"]
     harness_num_fewshot: int = 5
     harness_batch_size: int = 4
+
+    # Multi-account key pool
+    key_pool_strategy: str = "round_robin"  # round_robin, least_used, priority, budget_aware
+    encryption_key: str = ""  # Fernet key for encrypting stored API keys
+
+    # Multi-model management
+    warm_up_models: list[str] = []  # Ollama models to preload on startup
+    reference_external_model: str = "gpt-4o-mini"  # for savings calculation
 
 
 settings = Settings()
