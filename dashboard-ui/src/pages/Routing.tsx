@@ -1,126 +1,86 @@
 import { useEffect, useState } from 'react';
-import { GitBranch, Trophy } from 'lucide-react';
+import { Typography, Card, Table, Tag, Space, Select, Row, Col } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { getRoutingDecisions, getRoutingPerformance } from '../lib/api';
-import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
-} from 'recharts';
+import ExportDropdown from '../components/shared/ExportDropdown';
+import DateRangeFilter from '../components/shared/DateRangeFilter';
+import PageSkeleton from '../components/shared/PageSkeleton';
+import dayjs from 'dayjs';
 
 export default function Routing() {
   const [decisions, setDecisions] = useState<any[]>([]);
   const [performance, setPerformance] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [taskFilter, setTaskFilter] = useState<string | undefined>();
+  const [dateRange, setDateRange] = useState<[string | null, string | null]>([null, null]);
 
   useEffect(() => {
-    getRoutingDecisions(50).then((d) => setDecisions(d.data || [])).catch(() => {});
-    getRoutingPerformance().then((d) => setPerformance(d.data || [])).catch(() => {});
-  }, []);
+    Promise.all([
+      getRoutingDecisions({ limit: 100, date_from: dateRange[0] || undefined, date_to: dateRange[1] || undefined }),
+      getRoutingPerformance(taskFilter),
+    ])
+      .then(([d, p]) => { setDecisions(d.data || []); setPerformance(p.data || []); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [taskFilter, dateRange]);
+
+  if (loading) return <PageSkeleton type="table" />;
+
+  const columns: ColumnsType<any> = [
+    { title: 'Time', dataIndex: 'created_at', width: 100, render: (d: string) => d ? dayjs(d).format('HH:mm:ss') : '—' },
+    { title: 'Provider', dataIndex: 'provider', width: 110, render: (p: string) => <Tag color="blue">{p}</Tag>, filters: [...new Set(decisions.map((d) => d.provider))].map((p) => ({ text: p, value: p })), onFilter: (v, r) => r.provider === v },
+    { title: 'Model', dataIndex: 'model', width: 200, ellipsis: true, render: (m: string) => <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{m}</span> },
+    { title: 'Task', dataIndex: 'task_type', width: 120, render: (t: string) => <Tag color="gold">{t || '—'}</Tag> },
+    { title: 'Strategy', dataIndex: 'strategy', width: 110 },
+    { title: 'Latency', dataIndex: 'latency_ms', width: 90, sorter: (a: any, b: any) => a.latency_ms - b.latency_ms, render: (v: number) => `${v}ms` },
+    { title: 'Cost', dataIndex: 'cost_usd', width: 90, sorter: (a: any, b: any) => a.cost_usd - b.cost_usd, render: (v: number) => `$${v?.toFixed(4)}` },
+    { title: 'Tokens', key: 'tokens', width: 120, render: (_: any, r: any) => `${r.prompt_tokens}+${r.completion_tokens}` },
+  ];
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Routing</h1>
+    <div>
+      <Typography.Title level={4}>Routing</Typography.Title>
 
-      {/* Model Leaderboard */}
-      <div className="card">
-        <div className="flex items-center gap-2 mb-4">
-          <Trophy className="w-4 h-4 text-yellow-500" />
-          <h2 className="font-medium">Model Leaderboard</h2>
-        </div>
+      {/* Leaderboard */}
+      <Card title="Model Leaderboard" size="small" style={{ marginBottom: 16 }}
+        extra={<Select placeholder="Filter task type" allowClear onChange={setTaskFilter} style={{ width: 160 }}
+          options={[...new Set(performance.map((p) => p.task_type))].map((t) => ({ value: t, label: t }))} />}
+      >
         {performance.length > 0 ? (
           <>
-            <ResponsiveContainer width="100%" height={250}>
+            <ResponsiveContainer width="100%" height={220}>
               <BarChart data={performance}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                <XAxis dataKey="model" tick={{ fontSize: 11, fill: '#9ca3af' }} />
-                <YAxis tick={{ fontSize: 11, fill: '#9ca3af' }} />
-                <Tooltip contentStyle={{ background: '#1f2937', border: '1px solid #374151', borderRadius: '8px' }} />
+                <XAxis dataKey="model" tick={{ fontSize: 10 }} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip />
                 <Bar dataKey="avg_quality" fill="#3b82f6" name="Quality" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
-            <table className="w-full text-sm mt-4">
-              <thead>
-                <tr className="text-gray-500 text-xs">
-                  <th className="text-left p-2">Model</th>
-                  <th className="text-left p-2">Task</th>
-                  <th className="text-right p-2">Quality</th>
-                  <th className="text-right p-2">Latency</th>
-                  <th className="text-right p-2">Cost</th>
-                  <th className="text-right p-2">Samples</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-800">
-                {performance.map((p: any, i: number) => (
-                  <tr key={i}>
-                    <td className="p-2 font-mono text-xs">{p.model}</td>
-                    <td className="p-2"><span className="badge-yellow">{p.task_type}</span></td>
-                    <td className="p-2 text-right">{p.avg_quality?.toFixed(2)}</td>
-                    <td className="p-2 text-right text-gray-400">{p.avg_latency_ms?.toFixed(0)}ms</td>
-                    <td className="p-2 text-right text-gray-400">${p.avg_cost_usd?.toFixed(4)}</td>
-                    <td className="p-2 text-right text-gray-500">{p.sample_count}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <Table columns={[
+              { title: 'Model', dataIndex: 'model', render: (m: string) => <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{m}</span> },
+              { title: 'Task', dataIndex: 'task_type', render: (t: string) => <Tag color="gold">{t}</Tag> },
+              { title: 'Quality', dataIndex: 'avg_quality', sorter: (a: any, b: any) => a.avg_quality - b.avg_quality, render: (v: number) => v?.toFixed(2) },
+              { title: 'Latency', dataIndex: 'avg_latency_ms', sorter: (a: any, b: any) => a.avg_latency_ms - b.avg_latency_ms, render: (v: number) => `${v?.toFixed(0)}ms` },
+              { title: 'Cost', dataIndex: 'avg_cost_usd', sorter: (a: any, b: any) => a.avg_cost_usd - b.avg_cost_usd, render: (v: number) => `$${v?.toFixed(4)}` },
+              { title: 'Samples', dataIndex: 'sample_count' },
+            ]} dataSource={performance} rowKey={(r) => `${r.model}-${r.task_type}`} size="small" pagination={false} style={{ marginTop: 16 }} />
           </>
         ) : (
-          <div className="text-center text-gray-600 py-8">
-            No performance data yet. Route some requests first.
-          </div>
+          <div style={{ textAlign: 'center', padding: 40, color: '#6b7280' }}>No performance data yet</div>
         )}
-      </div>
+      </Card>
 
-      {/* Recent Decisions */}
-      <div className="card">
-        <div className="flex items-center gap-2 mb-4">
-          <GitBranch className="w-4 h-4 text-blue-500" />
-          <h2 className="font-medium">Recent Routing Decisions</h2>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-gray-500 text-xs">
-                <th className="text-left p-2">Time</th>
-                <th className="text-left p-2">Provider</th>
-                <th className="text-left p-2">Model</th>
-                <th className="text-left p-2">Task</th>
-                <th className="text-left p-2">Strategy</th>
-                <th className="text-right p-2">Latency</th>
-                <th className="text-right p-2">Cost</th>
-                <th className="text-right p-2">Tokens</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-800">
-              {decisions.map((d: any) => (
-                <tr key={d.id} className="hover:bg-gray-800/30">
-                  <td className="p-2 text-xs text-gray-500">
-                    {d.created_at ? new Date(d.created_at).toLocaleTimeString() : '—'}
-                  </td>
-                  <td className="p-2"><span className="badge-blue">{d.provider}</span></td>
-                  <td className="p-2 font-mono text-xs">{d.model}</td>
-                  <td className="p-2"><span className="badge-yellow">{d.task_type || '—'}</span></td>
-                  <td className="p-2 text-gray-400 text-xs">{d.strategy}</td>
-                  <td className="p-2 text-right">{d.latency_ms}ms</td>
-                  <td className="p-2 text-right">${d.cost_usd?.toFixed(4)}</td>
-                  <td className="p-2 text-right text-gray-400">
-                    {d.prompt_tokens}+{d.completion_tokens}
-                  </td>
-                </tr>
-              ))}
-              {decisions.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="p-8 text-center text-gray-600">
-                    No routing decisions yet
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {/* Decisions */}
+      <Card title="Recent Routing Decisions" size="small"
+        extra={<Space><DateRangeFilter value={dateRange} onChange={setDateRange} /><ExportDropdown data={decisions} filename="routing-decisions" /></Space>}
+      >
+        <Table columns={columns} dataSource={decisions} rowKey="id" size="small"
+          pagination={{ pageSize: 25, showSizeChanger: true, showTotal: (t) => `${t} decisions` }}
+          scroll={{ x: 900 }} />
+      </Card>
     </div>
   );
 }

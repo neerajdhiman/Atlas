@@ -1,120 +1,92 @@
 import { useState } from 'react';
-import { Download, Upload, CheckCircle, AlertCircle } from 'lucide-react';
+import { Typography, Card, Form, Input, Button, Result, Alert, Space, Upload, Divider, App } from 'antd';
+import { ImportOutlined, UploadOutlined, InboxOutlined, CheckCircleOutlined } from '@ant-design/icons';
 import { triggerPaperclipImport } from '../lib/api';
 
+const { Dragger } = Upload;
+
 export default function Import() {
-  const [apiUrl, setApiUrl] = useState('');
-  const [apiKey, setApiKey] = useState('');
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState('');
+  const { message } = App.useApp();
 
-  const handleImport = async () => {
-    if (!apiUrl) return;
+  const handlePaperclipImport = async (values: { api_url: string; api_key?: string }) => {
     setImporting(true);
     setError('');
     setResult(null);
     try {
-      const stats = await triggerPaperclipImport(apiUrl, apiKey || undefined);
+      const stats = await triggerPaperclipImport(values.api_url, values.api_key);
       setResult(stats);
+      message.success(`Imported ${stats.imported} conversations`);
     } catch (e: any) {
-      setError(e.message || 'Import failed');
+      setError(e.response?.data?.detail || e.message || 'Import failed');
     }
     setImporting(false);
   };
 
   return (
-    <div className="space-y-6 max-w-2xl">
-      <h1 className="text-2xl font-bold">Import</h1>
+    <div style={{ maxWidth: 700 }}>
+      <Typography.Title level={4}>Import</Typography.Title>
 
-      {/* Paperclip.ing import */}
-      <div className="card">
-        <div className="flex items-center gap-2 mb-4">
-          <Download className="w-5 h-5 text-blue-400" />
-          <h2 className="font-medium">Import from Paperclip.ing</h2>
-        </div>
-        <p className="text-sm text-gray-400 mb-4">
+      {/* Paperclip.ing */}
+      <Card title={<Space><ImportOutlined style={{ color: '#3b82f6' }} />Import from Paperclip.ing</Space>} size="small" style={{ marginBottom: 16 }}>
+        <Typography.Paragraph type="secondary" style={{ fontSize: 13 }}>
           Import conversation history from your paperclip.ing instance.
-          Conversations will be normalized and stored for training data.
-        </p>
-        <div className="space-y-3">
-          <div>
-            <label className="text-sm text-gray-400 block mb-1">API URL</label>
-            <input
-              type="text"
-              value={apiUrl}
-              onChange={(e) => setApiUrl(e.target.value)}
-              placeholder="https://your-instance.paperclip.ing"
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-            />
-          </div>
-          <div>
-            <label className="text-sm text-gray-400 block mb-1">API Key (optional)</label>
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-..."
-              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-            />
-          </div>
-          <button
-            onClick={handleImport}
-            disabled={importing || !apiUrl}
-            className="btn-primary flex items-center gap-2 disabled:opacity-50"
-          >
-            <Upload className="w-4 h-4" />
-            {importing ? 'Importing...' : 'Start Import'}
-          </button>
-        </div>
+        </Typography.Paragraph>
+
+        <Form onFinish={handlePaperclipImport} layout="vertical" requiredMark={false}>
+          <Form.Item name="api_url" label="API URL" rules={[{ required: true, message: 'API URL is required' }]}>
+            <Input placeholder="https://your-instance.paperclip.ing" />
+          </Form.Item>
+          <Form.Item name="api_key" label="API Key">
+            <Input.Password placeholder="sk-..." />
+          </Form.Item>
+          <Form.Item>
+            <Button type="primary" htmlType="submit" loading={importing} icon={<UploadOutlined />}>
+              Start Import
+            </Button>
+          </Form.Item>
+        </Form>
 
         {result && (
-          <div className="mt-4 p-3 bg-emerald-500/10 border border-emerald-500/20 rounded-lg">
-            <div className="flex items-center gap-2 mb-2">
-              <CheckCircle className="w-4 h-4 text-emerald-400" />
-              <span className="font-medium text-emerald-400">Import Complete</span>
-            </div>
-            <div className="grid grid-cols-3 gap-4 text-sm">
-              <div>
-                <p className="text-gray-400">Imported</p>
-                <p className="font-bold text-emerald-400">{result.imported}</p>
-              </div>
-              <div>
-                <p className="text-gray-400">Skipped (dupes)</p>
-                <p>{result.skipped}</p>
-              </div>
-              <div>
-                <p className="text-gray-400">Errors</p>
-                <p className={result.errors > 0 ? 'text-red-400' : ''}>{result.errors}</p>
-              </div>
-            </div>
-          </div>
+          <Result status="success" title="Import Complete" subTitle={`Imported ${result.imported} conversations`}
+            extra={<Space direction="vertical" size={4}>
+              <Typography.Text>Skipped (duplicates): {result.skipped}</Typography.Text>
+              <Typography.Text type={result.errors > 0 ? 'danger' : undefined}>Errors: {result.errors}</Typography.Text>
+            </Space>}
+            style={{ padding: '16px 0' }}
+          />
         )}
+        {error && <Alert message="Import Failed" description={error} type="error" showIcon />}
+      </Card>
 
-        {error && (
-          <div className="mt-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-red-400" />
-            <span className="text-red-400 text-sm">{error}</span>
-          </div>
-        )}
-      </div>
+      {/* JSONL Upload */}
+      <Card title={<Space><ImportOutlined style={{ color: '#8b5cf6' }} />Import from JSONL</Space>} size="small">
+        <Typography.Paragraph type="secondary" style={{ fontSize: 13 }}>
+          Upload an OpenAI-style JSONL file with conversations.
+        </Typography.Paragraph>
 
-      {/* JSONL import */}
-      <div className="card">
-        <div className="flex items-center gap-2 mb-4">
-          <Download className="w-5 h-5 text-purple-400" />
-          <h2 className="font-medium">Import from JSONL</h2>
-        </div>
-        <p className="text-sm text-gray-400 mb-4">
-          Import conversations from an OpenAI-style JSONL file. Each line should be:
-        </p>
-        <pre className="text-xs bg-gray-800 p-3 rounded-lg font-mono text-gray-400 mb-4">
-          {`{"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}`}
-        </pre>
-        <p className="text-xs text-gray-500">
-          Use the API endpoint directly: POST /admin/import/jsonl?file_path=/path/to/file.jsonl
-        </p>
-      </div>
+        <Dragger
+          name="file"
+          accept=".jsonl,.json"
+          action="/admin/import/jsonl-upload"
+          maxCount={1}
+          onChange={(info) => {
+            if (info.file.status === 'done') {
+              message.success(`${info.file.name} imported successfully`);
+            } else if (info.file.status === 'error') {
+              message.error(`${info.file.name} import failed`);
+            }
+          }}
+        >
+          <p style={{ fontSize: 32, color: '#6b7280' }}><InboxOutlined /></p>
+          <p>Click or drag JSONL file to upload</p>
+          <p style={{ fontSize: 12, color: '#9ca3af' }}>
+            Each line: {`{"messages": [{"role": "user", "content": "..."}, ...]}`}
+          </p>
+        </Dragger>
+      </Card>
     </div>
   );
 }

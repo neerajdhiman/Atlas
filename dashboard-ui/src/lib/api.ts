@@ -1,65 +1,106 @@
-const BASE = '';
+import axios from 'axios';
+import { useAuthStore } from '../stores/authStore';
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${url}`, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
-  });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return res.json();
-}
+const api = axios.create({
+  baseURL: '',
+  timeout: 15000,
+  headers: { 'Content-Type': 'application/json' },
+});
 
-// Overview
-export const getOverview = () => fetchJson<any>('/admin/overview');
-export const getMetrics = () => fetchJson<any>('/admin/metrics');
+// Request interceptor: add auth token
+api.interceptors.request.use((config) => {
+  const token = useAuthStore.getState().token;
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
 
-// Conversations
-export const getConversations = (limit = 50, offset = 0) =>
-  fetchJson<any>(`/admin/conversations?limit=${limit}&offset=${offset}`);
+// Response interceptor: handle auth errors
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    if (error.response?.status === 401) {
+      useAuthStore.getState().logout();
+    }
+    // Let pages handle their own error display
+    return Promise.reject(error);
+  }
+);
+
+// --- Overview ---
+export const getOverview = () => api.get('/admin/overview').then((r) => r.data);
+export const getMetrics = () => api.get('/admin/metrics').then((r) => r.data);
+
+// --- Conversations ---
+export const getConversations = (params: {
+  limit?: number;
+  offset?: number;
+  search?: string;
+  source?: string;
+  date_from?: string;
+  date_to?: string;
+}) => api.get('/admin/conversations', { params }).then((r) => r.data);
+
 export const getConversation = (id: string) =>
-  fetchJson<any>(`/admin/conversations/${id}`);
+  api.get(`/admin/conversations/${id}`).then((r) => r.data);
+
 export const addFeedback = (convId: string, messageId: string, value: number) =>
-  fetchJson<any>(
-    `/admin/conversations/${convId}/feedback?message_id=${messageId}&value=${value}`,
-    { method: 'POST' }
-  );
+  api.post(`/admin/conversations/${convId}/feedback`, null, {
+    params: { message_id: messageId, value },
+  }).then((r) => r.data);
 
-// Routing
-export const getRoutingDecisions = (limit = 100) =>
-  fetchJson<any>(`/admin/routing/decisions?limit=${limit}`);
+// --- Routing ---
+export const getRoutingDecisions = (params: {
+  limit?: number;
+  offset?: number;
+  provider?: string;
+  task_type?: string;
+  strategy?: string;
+  date_from?: string;
+  date_to?: string;
+}) => api.get('/admin/routing/decisions', { params }).then((r) => r.data);
+
 export const getRoutingPerformance = (taskType?: string) =>
-  fetchJson<any>(`/admin/routing/performance${taskType ? `?task_type=${taskType}` : ''}`);
+  api.get('/admin/routing/performance', { params: taskType ? { task_type: taskType } : {} }).then((r) => r.data);
 
-// Providers
-export const getProviders = () => fetchJson<any>('/admin/providers');
-export const refreshProviders = () =>
-  fetchJson<any>('/admin/providers/refresh', { method: 'POST' });
+// --- Providers ---
+export const getProviders = () => api.get('/admin/providers').then((r) => r.data);
+export const refreshProviders = () => api.post('/admin/providers/refresh').then((r) => r.data);
 
-// Training
+// --- Training ---
 export const getTrainingRuns = (limit = 50) =>
-  fetchJson<any>(`/admin/training/runs?limit=${limit}`);
+  api.get('/admin/training/runs', { params: { limit } }).then((r) => r.data);
 export const getTrainingRun = (id: string) =>
-  fetchJson<any>(`/admin/training/runs/${id}`);
+  api.get(`/admin/training/runs/${id}`).then((r) => r.data);
 export const createTrainingRun = (config: any) =>
-  fetchJson<any>('/admin/training/runs', {
-    method: 'POST',
-    body: JSON.stringify(config),
-  });
+  api.post('/admin/training/runs', config).then((r) => r.data);
 
-// Import
+// --- Import ---
 export const triggerPaperclipImport = (apiUrl: string, apiKey?: string) =>
-  fetchJson<any>(
-    `/admin/import/paperclip?api_url=${encodeURIComponent(apiUrl)}${apiKey ? `&api_key=${apiKey}` : ''}`,
-    { method: 'POST' }
-  );
+  api.post('/admin/import/paperclip', null, {
+    params: { api_url: apiUrl, ...(apiKey ? { api_key: apiKey } : {}) },
+  }).then((r) => r.data);
 
-// Models
-export const getModels = () => fetchJson<any>('/v1/models');
+// --- Models ---
+export const getModels = () => api.get('/v1/models').then((r) => r.data);
 
-// WebSocket live feed
-export function connectLiveFeed(onMessage: (event: any) => void): WebSocket {
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${protocol}//${window.location.host}/admin/ws/live-feed`);
-  ws.onmessage = (e) => onMessage(JSON.parse(e.data));
-  return ws;
-}
+// --- Settings ---
+export const getSettings = () => api.get('/admin/settings').then((r) => r.data);
+export const saveSettings = (settings: any) => api.put('/admin/settings', settings).then((r) => r.data);
+
+// --- Auth ---
+export const loginApi = (username: string, password: string) =>
+  api.post('/admin/auth/login', { username, password }).then((r) => r.data);
+export const refreshTokenApi = (refreshToken: string) =>
+  api.post('/admin/auth/refresh', { refresh_token: refreshToken }).then((r) => r.data);
+export const getCurrentUser = () => api.get('/admin/auth/me').then((r) => r.data);
+
+// --- Argilla ---
+export const getArgillaStatus = () => api.get('/admin/argilla/status').then((r) => r.data);
+export const exportToArgilla = (datasetName: string) =>
+  api.post('/admin/argilla/export', null, { params: { dataset_name: datasetName } }).then((r) => r.data);
+export const importFromArgilla = (datasetName: string) =>
+  api.post('/admin/argilla/import', null, { params: { dataset_name: datasetName } }).then((r) => r.data);
+
+export default api;

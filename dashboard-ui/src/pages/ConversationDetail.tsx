@@ -1,147 +1,136 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, ThumbsUp, ThumbsDown, Bot, User, Wrench } from 'lucide-react';
+import { Card, Tag, Button, Descriptions, Typography, Space, App, Tooltip } from 'antd';
+import {
+  ArrowLeftOutlined,
+  LikeOutlined,
+  DislikeOutlined,
+  UserOutlined,
+  RobotOutlined,
+  ToolOutlined,
+  CopyOutlined,
+} from '@ant-design/icons';
 import { getConversation, addFeedback } from '../lib/api';
+import PageSkeleton from '../components/shared/PageSkeleton';
+import dayjs from 'dayjs';
 
-const roleIcon: Record<string, any> = {
-  user: User,
-  assistant: Bot,
-  system: Wrench,
-  tool: Wrench,
-};
+const { Text } = Typography;
 
-const roleBg: Record<string, string> = {
-  user: 'bg-blue-500/10 border-blue-500/20',
-  assistant: 'bg-purple-500/10 border-purple-500/20',
-  system: 'bg-gray-500/10 border-gray-500/20',
-  tool: 'bg-yellow-500/10 border-yellow-500/20',
+const roleConfig: Record<string, { icon: any; color: string; border: string }> = {
+  user: { icon: <UserOutlined />, color: '#3b82f6', border: '#3b82f620' },
+  assistant: { icon: <RobotOutlined />, color: '#8b5cf6', border: '#8b5cf620' },
+  system: { icon: <ToolOutlined />, color: '#6b7280', border: '#6b728020' },
+  tool: { icon: <ToolOutlined />, color: '#f59e0b', border: '#f59e0b20' },
 };
 
 export default function ConversationDetail() {
   const { id } = useParams();
   const [conv, setConv] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const { message: messageApi } = App.useApp();
 
   useEffect(() => {
-    if (id) getConversation(id).then(setConv).catch(() => {});
+    if (id) {
+      getConversation(id).then(setConv).catch(() => {}).finally(() => setLoading(false));
+    }
   }, [id]);
 
-  if (!conv) {
-    return <div className="text-gray-500">Loading...</div>;
-  }
+  if (loading) return <PageSkeleton type="detail" />;
+  if (!conv) return <div>Conversation not found</div>;
 
   const handleFeedback = async (messageId: string, value: number) => {
     await addFeedback(conv.id, messageId, value);
+    messageApi.success('Feedback recorded');
+  };
+
+  const copyMessage = (content: string) => {
+    navigator.clipboard.writeText(content);
+    messageApi.success('Copied to clipboard');
   };
 
   return (
-    <div className="space-y-6 max-w-4xl">
-      <div className="flex items-center gap-3">
-        <Link to="/conversations" className="btn-secondary p-2">
-          <ArrowLeft className="w-4 h-4" />
+    <div style={{ maxWidth: 900 }}>
+      <Space style={{ marginBottom: 16 }}>
+        <Link to="/conversations">
+          <Button icon={<ArrowLeftOutlined />}>Back</Button>
         </Link>
-        <div>
-          <h1 className="text-xl font-bold">Conversation</h1>
-          <p className="text-xs text-gray-500 font-mono">{conv.id}</p>
-        </div>
-        <span className="badge-purple ml-auto">{conv.source}</span>
-      </div>
+        <Typography.Title level={4} style={{ margin: 0 }}>Conversation</Typography.Title>
+        <Tag color="purple">{conv.source}</Tag>
+      </Space>
 
-      {/* Metadata */}
-      <div className="card text-sm">
-        <div className="grid grid-cols-3 gap-4">
-          <div>
-            <span className="text-gray-500">User:</span>{' '}
-            <span>{conv.user_id || '—'}</span>
-          </div>
-          <div>
-            <span className="text-gray-500">Created:</span>{' '}
-            <span>{conv.created_at ? new Date(conv.created_at).toLocaleString() : '—'}</span>
-          </div>
-          <div>
-            <span className="text-gray-500">Messages:</span>{' '}
-            <span>{conv.messages?.length ?? 0}</span>
-          </div>
-        </div>
-      </div>
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <Descriptions column={{ xs: 1, sm: 2, md: 3 }} size="small">
+          <Descriptions.Item label="ID"><Text copyable style={{ fontFamily: 'monospace', fontSize: 12 }}>{conv.id}</Text></Descriptions.Item>
+          <Descriptions.Item label="User">{conv.user_id || '—'}</Descriptions.Item>
+          <Descriptions.Item label="Created">{conv.created_at ? dayjs(conv.created_at).format('YYYY-MM-DD HH:mm:ss') : '—'}</Descriptions.Item>
+          <Descriptions.Item label="Messages">{conv.messages?.length ?? 0}</Descriptions.Item>
+        </Descriptions>
+      </Card>
 
-      {/* Messages */}
-      <div className="space-y-3">
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
         {(conv.messages ?? []).map((msg: any) => {
-          const Icon = roleIcon[msg.role] || User;
+          const config = roleConfig[msg.role] || roleConfig.user;
           return (
-            <div
+            <Card
               key={msg.id}
-              className={`rounded-xl border p-4 ${roleBg[msg.role] || 'bg-gray-800'}`}
-            >
-              <div className="flex items-start gap-3">
-                <div className="mt-0.5 p-1.5 rounded-lg bg-gray-800">
-                  <Icon className="w-4 h-4" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="font-medium capitalize text-sm">{msg.role}</span>
-                    <span className="text-xs text-gray-500">#{msg.sequence}</span>
-                    {msg.token_count && (
-                      <span className="text-xs text-gray-600">{msg.token_count} tokens</span>
-                    )}
-                  </div>
-                  <div className="text-sm text-gray-300 whitespace-pre-wrap break-words">
-                    {msg.content}
-                  </div>
-
-                  {/* Routing decision */}
-                  {msg.routing_decision && (
-                    <div className="mt-3 p-2 bg-gray-800/50 rounded-lg text-xs space-y-1">
-                      <div className="flex flex-wrap gap-2">
-                        <span className="badge-blue">{msg.routing_decision.provider}</span>
-                        <span className="badge-purple">{msg.routing_decision.model}</span>
-                        <span className="badge-yellow">{msg.routing_decision.task_type}</span>
-                        <span className="text-gray-500">
-                          {msg.routing_decision.latency_ms}ms · ${msg.routing_decision.cost_usd.toFixed(4)} · {msg.routing_decision.prompt_tokens}+{msg.routing_decision.completion_tokens} tokens
-                        </span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Quality signals */}
-                  {msg.quality_signals?.length > 0 && (
-                    <div className="mt-2 flex gap-1">
-                      {msg.quality_signals.map((s: any, i: number) => (
-                        <span
-                          key={i}
-                          className={s.value >= 0.5 ? 'badge-green' : 'badge-red'}
-                        >
-                          {s.type}: {s.value}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Feedback buttons for assistant messages */}
+              size="small"
+              style={{ borderLeft: `3px solid ${config.color}` }}
+              title={
+                <Space>
+                  {config.icon}
+                  <Text strong style={{ textTransform: 'capitalize' }}>{msg.role}</Text>
+                  <Text type="secondary" style={{ fontSize: 11 }}>#{msg.sequence}</Text>
+                  {msg.token_count && <Text type="secondary" style={{ fontSize: 11 }}>{msg.token_count} tokens</Text>}
+                </Space>
+              }
+              extra={
+                <Space>
+                  <Tooltip title="Copy">
+                    <Button type="text" size="small" icon={<CopyOutlined />} onClick={() => copyMessage(msg.content)} />
+                  </Tooltip>
                   {msg.role === 'assistant' && (
-                    <div className="mt-2 flex gap-2">
-                      <button
-                        onClick={() => handleFeedback(msg.id, 1.0)}
-                        className="p-1 text-gray-500 hover:text-emerald-400 transition-colors"
-                        title="Good response"
-                      >
-                        <ThumbsUp className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => handleFeedback(msg.id, 0.0)}
-                        className="p-1 text-gray-500 hover:text-red-400 transition-colors"
-                        title="Bad response"
-                      >
-                        <ThumbsDown className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
+                    <>
+                      <Tooltip title="Good response">
+                        <Button type="text" size="small" icon={<LikeOutlined />} onClick={() => handleFeedback(msg.id, 1.0)} />
+                      </Tooltip>
+                      <Tooltip title="Bad response">
+                        <Button type="text" size="small" icon={<DislikeOutlined />} onClick={() => handleFeedback(msg.id, 0.0)} />
+                      </Tooltip>
+                    </>
                   )}
-                </div>
+                </Space>
+              }
+            >
+              <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 13 }}>
+                {msg.content}
               </div>
-            </div>
+
+              {msg.routing_decision && (
+                <div style={{ marginTop: 12, padding: 8, background: 'rgba(0,0,0,0.1)', borderRadius: 6 }}>
+                  <Space wrap size={4}>
+                    <Tag color="blue">{msg.routing_decision.provider}</Tag>
+                    <Tag color="purple">{msg.routing_decision.model}</Tag>
+                    <Tag color="gold">{msg.routing_decision.task_type}</Tag>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      {msg.routing_decision.latency_ms}ms · ${msg.routing_decision.cost_usd?.toFixed(4)} · {msg.routing_decision.prompt_tokens}+{msg.routing_decision.completion_tokens} tokens
+                    </Text>
+                  </Space>
+                </div>
+              )}
+
+              {msg.quality_signals?.length > 0 && (
+                <Space style={{ marginTop: 8 }}>
+                  {msg.quality_signals.map((s: any, i: number) => (
+                    <Tag key={i} color={s.value >= 0.5 ? 'success' : 'error'}>
+                      {s.type}: {s.value}
+                    </Tag>
+                  ))}
+                </Space>
+              )}
+            </Card>
           );
         })}
-      </div>
+      </Space>
     </div>
   );
 }

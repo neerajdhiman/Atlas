@@ -1,111 +1,127 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { MessageSquare, Search, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Typography, Table, Tag, Input, Space, Card } from 'antd';
+import type { ColumnsType, TablePaginationConfig } from 'antd/es/table';
+import { useNavigate } from 'react-router-dom';
 import { getConversations } from '../lib/api';
+import ExportDropdown from '../components/shared/ExportDropdown';
+import DateRangeFilter from '../components/shared/DateRangeFilter';
+import dayjs from 'dayjs';
+
+const { Search } = Input;
 
 export default function Conversations() {
-  const [data, setData] = useState<any>(null);
-  const [offset, setOffset] = useState(0);
+  const [data, setData] = useState<any[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
   const [search, setSearch] = useState('');
-  const limit = 25;
+  const [dateRange, setDateRange] = useState<[string | null, string | null]>([null, null]);
+  const navigate = useNavigate();
 
-  useEffect(() => {
-    getConversations(limit, offset).then(setData).catch(() => {});
-  }, [offset]);
+  const load = () => {
+    setLoading(true);
+    getConversations({
+      limit: pageSize,
+      offset: (page - 1) * pageSize,
+      search: search || undefined,
+      date_from: dateRange[0] || undefined,
+      date_to: dateRange[1] || undefined,
+    })
+      .then((res) => {
+        setData(res.data || []);
+        setTotal(res.total || 0);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  };
 
-  const conversations = data?.data ?? [];
-  const total = data?.total ?? 0;
+  useEffect(load, [page, pageSize, search, dateRange]);
+
+  const columns: ColumnsType<any> = [
+    {
+      title: 'ID',
+      dataIndex: 'id',
+      width: 120,
+      render: (id: string) => (
+        <a onClick={() => navigate(`/conversations/${id}`)} style={{ fontFamily: 'monospace', fontSize: 12 }}>
+          {id.slice(0, 8)}...
+        </a>
+      ),
+    },
+    {
+      title: 'Source',
+      dataIndex: 'source',
+      width: 130,
+      render: (s: string) => <Tag color="purple">{s}</Tag>,
+      filters: [
+        { text: 'proxy', value: 'proxy' },
+        { text: 'import:paperclip', value: 'import:paperclip' },
+        { text: 'import:openai_jsonl', value: 'import:openai_jsonl' },
+      ],
+      onFilter: (value, record) => record.source === value,
+    },
+    {
+      title: 'User',
+      dataIndex: 'user_id',
+      render: (u: string | null) => u || '—',
+    },
+    {
+      title: 'Messages',
+      dataIndex: 'message_count',
+      width: 100,
+      sorter: (a, b) => a.message_count - b.message_count,
+    },
+    {
+      title: 'Created',
+      dataIndex: 'created_at',
+      width: 180,
+      sorter: (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+      render: (d: string) => d ? dayjs(d).format('YYYY-MM-DD HH:mm') : '—',
+    },
+  ];
+
+  const pagination: TablePaginationConfig = {
+    current: page,
+    pageSize,
+    total,
+    showSizeChanger: true,
+    showTotal: (t) => `${t} conversations`,
+    pageSizeOptions: [10, 25, 50, 100],
+    onChange: (p, ps) => { setPage(p); setPageSize(ps); },
+  };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Conversations</h1>
-        <span className="text-sm text-gray-500">{total} total</span>
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <Typography.Title level={4} style={{ margin: 0 }}>Conversations</Typography.Title>
+        <ExportDropdown data={data} filename="conversations" />
       </div>
 
-      {/* Search */}
-      <div className="relative">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-        <input
-          type="text"
+      <Space style={{ marginBottom: 16 }} wrap>
+        <Search
           placeholder="Search conversations..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="w-full pl-10 pr-4 py-2.5 bg-gray-900 border border-gray-800 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+          allowClear
+          onSearch={setSearch}
+          style={{ width: 300 }}
         />
-      </div>
+        <DateRangeFilter value={dateRange} onChange={setDateRange} />
+      </Space>
 
-      {/* Table */}
-      <div className="card overflow-hidden p-0">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-800/50">
-            <tr>
-              <th className="text-left p-3 text-gray-400 font-medium">ID</th>
-              <th className="text-left p-3 text-gray-400 font-medium">Source</th>
-              <th className="text-left p-3 text-gray-400 font-medium">User</th>
-              <th className="text-left p-3 text-gray-400 font-medium">Messages</th>
-              <th className="text-left p-3 text-gray-400 font-medium">Created</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-800">
-            {conversations.map((c: any) => (
-              <tr key={c.id} className="hover:bg-gray-800/30 transition-colors">
-                <td className="p-3">
-                  <Link
-                    to={`/conversations/${c.id}`}
-                    className="text-blue-400 hover:text-blue-300 font-mono text-xs"
-                  >
-                    {c.id.slice(0, 8)}...
-                  </Link>
-                </td>
-                <td className="p-3">
-                  <span className="badge-purple">{c.source}</span>
-                </td>
-                <td className="p-3 text-gray-400">{c.user_id || '—'}</td>
-                <td className="p-3">
-                  <span className="flex items-center gap-1 text-gray-400">
-                    <MessageSquare className="w-3 h-3" />
-                    {c.message_count}
-                  </span>
-                </td>
-                <td className="p-3 text-gray-500 text-xs">
-                  {c.created_at ? new Date(c.created_at).toLocaleString() : '—'}
-                </td>
-              </tr>
-            ))}
-            {conversations.length === 0 && (
-              <tr>
-                <td colSpan={5} className="p-8 text-center text-gray-600">
-                  No conversations yet
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {/* Pagination */}
-      <div className="flex items-center justify-between">
-        <span className="text-sm text-gray-500">
-          Showing {offset + 1}–{Math.min(offset + limit, total)} of {total}
-        </span>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setOffset(Math.max(0, offset - limit))}
-            disabled={offset === 0}
-            className="btn-secondary disabled:opacity-50"
-          >
-            <ChevronLeft className="w-4 h-4" />
-          </button>
-          <button
-            onClick={() => setOffset(offset + limit)}
-            disabled={offset + limit >= total}
-            className="btn-secondary disabled:opacity-50"
-          >
-            <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
+      <Card size="small" styles={{ body: { padding: 0 } }}>
+        <Table
+          columns={columns}
+          dataSource={data}
+          rowKey="id"
+          loading={loading}
+          pagination={pagination}
+          size="small"
+          onRow={(record) => ({
+            onClick: () => navigate(`/conversations/${record.id}`),
+            style: { cursor: 'pointer' },
+          })}
+        />
+      </Card>
     </div>
   );
 }

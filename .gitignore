@@ -28,3 +28,6 @@ cache/
 
 alembic/versions/*.py
 !alembic/versions/__init__.py
+
+.vite/
+.claude/settings.local.json

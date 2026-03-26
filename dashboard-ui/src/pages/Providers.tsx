@@ -1,15 +1,22 @@
 import { useEffect, useState } from 'react';
-import { Server, RefreshCw, CheckCircle, XCircle } from 'lucide-react';
+import { Typography, Card, Button, Tag, Table, Row, Col, Badge, Space, App } from 'antd';
+import { ReloadOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import { getProviders, refreshProviders, getModels } from '../lib/api';
+import PageSkeleton from '../components/shared/PageSkeleton';
 
 export default function Providers() {
   const [providers, setProviders] = useState<any[]>([]);
   const [models, setModels] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const { message } = App.useApp();
 
   const load = () => {
-    getProviders().then((d) => setProviders(d.data || [])).catch(() => {});
-    getModels().then((d) => setModels(d.data || [])).catch(() => {});
+    setLoading(true);
+    Promise.all([getProviders(), getModels()])
+      .then(([p, m]) => { setProviders(p.data || []); setModels(m.data || []); })
+      .catch(() => {})
+      .finally(() => setLoading(false));
   };
 
   useEffect(load, []);
@@ -19,81 +26,52 @@ export default function Providers() {
     try {
       const result = await refreshProviders();
       setProviders(result.providers || []);
+      message.success('Provider health refreshed');
     } catch {}
     setRefreshing(false);
   };
 
+  if (loading) return <PageSkeleton />;
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Providers</h1>
-        <button onClick={handleRefresh} className="btn-secondary flex items-center gap-2">
-          <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
-          Refresh Health
-        </button>
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <Typography.Title level={4} style={{ margin: 0 }}>Providers</Typography.Title>
+        <Button icon={<ReloadOutlined />} loading={refreshing} onClick={handleRefresh}>Refresh Health</Button>
       </div>
 
-      {/* Provider cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {providers.map((p: any) => (
-          <div key={p.name} className="card">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <Server className="w-5 h-5 text-gray-400" />
-                <h3 className="font-bold text-lg capitalize">{p.name}</h3>
-              </div>
-              {p.healthy ? (
-                <span className="badge-green flex items-center gap-1">
-                  <CheckCircle className="w-3 h-3" /> Healthy
-                </span>
-              ) : (
-                <span className="badge-red flex items-center gap-1">
-                  <XCircle className="w-3 h-3" /> Unavailable
-                </span>
-              )}
-            </div>
-            <div className="space-y-2">
-              <p className="text-sm text-gray-400">
-                {p.models?.length ?? 0} models available
-              </p>
-              <div className="flex flex-wrap gap-1">
-                {(p.models || []).map((m: string) => (
-                  <span key={m} className="badge-blue font-mono text-xs">
-                    {m}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
+      <Row gutter={[16, 16]}>
+        {providers.map((p) => (
+          <Col key={p.name} xs={24} sm={12} md={12} lg={6}>
+            <Badge.Ribbon text={p.healthy ? 'Healthy' : 'Down'} color={p.healthy ? 'green' : 'red'}>
+              <Card size="small">
+                <Typography.Title level={5} style={{ textTransform: 'capitalize', marginTop: 0 }}>
+                  {p.healthy ? <CheckCircleOutlined style={{ color: '#10b981', marginRight: 8 }} /> : <CloseCircleOutlined style={{ color: '#ef4444', marginRight: 8 }} />}
+                  {p.name}
+                </Typography.Title>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>{p.models?.length ?? 0} models</Typography.Text>
+                <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  {(p.models || []).map((m: string) => <Tag key={m} color="blue" style={{ fontSize: 11 }}>{m}</Tag>)}
+                </div>
+              </Card>
+            </Badge.Ribbon>
+          </Col>
         ))}
-      </div>
+      </Row>
 
-      {/* All available models */}
-      <div className="card">
-        <h2 className="font-medium mb-4">All Available Models</h2>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="text-gray-500 text-xs">
-                <th className="text-left p-2">Model ID</th>
-                <th className="text-left p-2">Provider</th>
-                <th className="text-right p-2">Context Window</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-800">
-              {models.map((m: any) => (
-                <tr key={m.id}>
-                  <td className="p-2 font-mono text-xs">{m.id}</td>
-                  <td className="p-2"><span className="badge-purple">{m.owned_by}</span></td>
-                  <td className="p-2 text-right text-gray-400">
-                    {m.context_window?.toLocaleString()}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      <Card title="All Available Models" size="small" style={{ marginTop: 16 }}>
+        <Table
+          columns={[
+            { title: 'Model ID', dataIndex: 'id', render: (m: string) => <span style={{ fontFamily: 'monospace', fontSize: 12 }}>{m}</span> },
+            { title: 'Provider', dataIndex: 'owned_by', render: (p: string) => <Tag color="purple">{p}</Tag> },
+            { title: 'Context Window', dataIndex: 'context_window', render: (c: number) => c?.toLocaleString(), sorter: (a: any, b: any) => a.context_window - b.context_window },
+          ]}
+          dataSource={models}
+          rowKey="id"
+          size="small"
+          pagination={false}
+        />
+      </Card>
     </div>
   );
 }
