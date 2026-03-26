@@ -15,6 +15,8 @@ const Training = React.lazy(() => import('./pages/Training'));
 const Analytics = React.lazy(() => import('./pages/Analytics'));
 const Import = React.lazy(() => import('./pages/Import'));
 const SettingsPage = React.lazy(() => import('./pages/Settings'));
+const Accounts = React.lazy(() => import('./pages/Accounts'));
+const Models = React.lazy(() => import('./pages/Models'));
 
 function PageWrapper({ children, skeleton }: { children: React.ReactNode; skeleton?: string }) {
   return (
@@ -40,6 +42,8 @@ export default function App() {
               <Route path="/conversations/:id" element={<PageWrapper skeleton="detail"><ConversationDetail /></PageWrapper>} />
               <Route path="/routing" element={<PageWrapper skeleton="table"><Routing /></PageWrapper>} />
               <Route path="/providers" element={<PageWrapper><Providers /></PageWrapper>} />
+              <Route path="/accounts" element={<PageWrapper skeleton="table"><Accounts /></PageWrapper>} />
+              <Route path="/models" element={<PageWrapper><Models /></PageWrapper>} />
               <Route path="/training" element={<PageWrapper><Training /></PageWrapper>} />
               <Route path="/analytics" element={<PageWrapper><Analytics /></PageWrapper>} />
               <Route path="/import" element={<PageWrapper skeleton="form"><Import /></PageWrapper>} />

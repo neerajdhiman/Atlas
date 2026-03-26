@@ -87,6 +87,41 @@ export default function Overview() {
         </Col>
       </Row>
 
+      {/* Local vs External */}
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} sm={8}>
+          <Card size="small" style={{ borderLeft: '3px solid #10b981' }}>
+            <Statistic
+              title="Local Tokens (Free)"
+              value={m?.local?.total_tokens ?? 0}
+              valueStyle={{ color: '#10b981' }}
+              suffix={<Tag color="success" style={{ marginLeft: 8 }}>{m?.local?.request_count ?? 0} requests</Tag>}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} sm={8}>
+          <Card size="small" style={{ borderLeft: '3px solid #3b82f6' }}>
+            <Statistic
+              title="External Tokens (Paid)"
+              value={m?.external?.total_tokens ?? 0}
+              valueStyle={{ color: '#3b82f6' }}
+              suffix={<Tag color="blue" style={{ marginLeft: 8 }}>${m?.external?.cost_usd ?? 0}</Tag>}
+            />
+          </Card>
+        </Col>
+        <Col xs={24} sm={8}>
+          <Card size="small" style={{ borderLeft: '3px solid #f59e0b' }}>
+            <Statistic
+              title="Savings (Local vs External)"
+              value={m?.savings_usd ?? 0}
+              prefix="$"
+              precision={4}
+              valueStyle={{ color: '#f59e0b' }}
+            />
+          </Card>
+        </Col>
+      </Row>
+
       {/* Charts + Live Feed */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={8}>

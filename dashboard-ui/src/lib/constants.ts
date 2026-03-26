@@ -5,6 +5,8 @@ export const ROLE_PAGE_ACCESS: Record<string, Role[]> = {
   '/conversations': ['admin', 'operator', 'viewer'],
   '/routing': ['admin', 'operator', 'viewer'],
   '/providers': ['admin', 'operator', 'viewer'],
+  '/accounts': ['admin'],
+  '/models': ['admin', 'operator', 'viewer'],
   '/training': ['admin', 'operator', 'viewer'],
   '/analytics': ['admin', 'operator', 'viewer'],
   '/import': ['admin', 'operator'],

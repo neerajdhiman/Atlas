@@ -356,6 +356,199 @@ async def evaluate_training_run(
     return eval_results
 
 
+# --- Provider Accounts (multi-key management) ---
+@router.get("/accounts")
+async def list_accounts(db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import select
+    from a1.db.models import ProviderAccount
+    result = await db.execute(
+        select(ProviderAccount).order_by(ProviderAccount.provider, ProviderAccount.priority.desc())
+    )
+    accounts = result.scalars().all()
+    return {
+        "data": [
+            {
+                "id": str(a.id),
+                "provider": a.provider,
+                "name": a.name,
+                "is_active": a.is_active,
+                "priority": a.priority,
+                "rate_limit_rpm": a.rate_limit_rpm,
+                "monthly_budget_usd": float(a.monthly_budget_usd) if a.monthly_budget_usd else None,
+                "current_month_cost_usd": float(a.current_month_cost_usd),
+                "total_requests": a.total_requests,
+                "total_tokens": a.total_tokens,
+                "last_used_at": a.last_used_at.isoformat() if a.last_used_at else None,
+                "last_error": a.last_error,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+            for a in accounts
+        ]
+    }
+
+
+@router.post("/accounts")
+async def create_account(
+    provider: str,
+    name: str,
+    api_key: str,
+    priority: int = 0,
+    rate_limit_rpm: int | None = None,
+    monthly_budget_usd: float | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    from a1.db.models import ProviderAccount
+    from a1.providers.key_pool import encrypt_key, key_pool
+    account = ProviderAccount(
+        provider=provider,
+        name=name,
+        api_key_encrypted=encrypt_key(api_key),
+        priority=priority,
+        rate_limit_rpm=rate_limit_rpm,
+        monthly_budget_usd=monthly_budget_usd,
+    )
+    db.add(account)
+    await db.flush()
+    await key_pool.load_accounts()  # reload pool
+    return {"id": str(account.id), "status": "created"}
+
+
+@router.delete("/accounts/{account_id}")
+async def delete_account(account_id: str, db: AsyncSession = Depends(get_db)):
+    from sqlalchemy import delete as sql_delete
+    from a1.db.models import ProviderAccount
+    from a1.providers.key_pool import key_pool
+    await db.execute(sql_delete(ProviderAccount).where(ProviderAccount.id == uuid.UUID(account_id)))
+    await key_pool.load_accounts()
+    return {"status": "deleted"}
+
+
+@router.post("/accounts/{account_id}/test")
+async def test_account(account_id: str, db: AsyncSession = Depends(get_db)):
+    from a1.db.models import ProviderAccount
+    from a1.providers.key_pool import decrypt_key
+    result = await db.execute(
+        __import__("sqlalchemy").select(ProviderAccount).where(ProviderAccount.id == uuid.UUID(account_id))
+    )
+    account = result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(404, "Account not found")
+    try:
+        import litellm
+        api_key = decrypt_key(account.api_key_encrypted)
+        await litellm.acompletion(
+            model="gpt-4o-mini" if account.provider == "openai" else "claude-haiku-4-5-20251001",
+            messages=[{"role": "user", "content": "hi"}],
+            max_tokens=1,
+            api_key=api_key,
+        )
+        return {"status": "ok", "message": "Key is valid"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# --- Analytics ---
+@router.get("/analytics/local-vs-external")
+async def analytics_local_vs_external():
+    snapshot = metrics.snapshot()
+    return {
+        "local": snapshot["local"],
+        "external": snapshot["external"],
+        "savings_usd": snapshot["savings_usd"],
+    }
+
+
+@router.get("/analytics/latency")
+async def analytics_latency():
+    snapshot = metrics.snapshot()
+    result = []
+    for model in snapshot.get("model_counts", {}):
+        percs = metrics.get_latency_percentiles(model)
+        result.append({"model": model, **percs})
+    return {"data": result}
+
+
+@router.get("/analytics/errors")
+async def analytics_errors():
+    snapshot = metrics.snapshot()
+    return {"data": snapshot.get("error_counts_by_provider", {})}
+
+
+# --- Ollama Management ---
+@router.get("/ollama/models")
+async def ollama_models():
+    from a1.providers.registry import provider_registry
+    ollama = provider_registry.get_provider("ollama")
+    if not ollama:
+        return {"data": [], "servers": []}
+    return {
+        "data": [
+            {"name": m.name, "provider": m.provider, "context_window": m.context_window}
+            for m in ollama.list_models()
+        ],
+        "servers": ollama.list_servers() if hasattr(ollama, "list_servers") else [],
+    }
+
+
+@router.post("/ollama/pull")
+async def ollama_pull(name: str, server_url: str | None = None):
+    import httpx
+    from config.settings import settings
+    url = server_url or (settings.ollama_servers[0] if settings.ollama_servers else settings.ollama_base_url)
+    async with httpx.AsyncClient(base_url=url, timeout=600.0) as client:
+        resp = await client.post("/api/pull", json={"name": name})
+        return resp.json()
+
+
+@router.delete("/ollama/models/{name}")
+async def ollama_delete(name: str, server_url: str | None = None):
+    import httpx
+    from config.settings import settings
+    url = server_url or (settings.ollama_servers[0] if settings.ollama_servers else settings.ollama_base_url)
+    async with httpx.AsyncClient(base_url=url, timeout=30.0) as client:
+        resp = await client.delete("/api/delete", json={"name": name})
+        return resp.json()
+
+
+@router.post("/models/compare")
+async def compare_models(
+    prompt: str,
+    models: list[str],
+    max_tokens: int = 500,
+):
+    """Run the same prompt through multiple models and compare responses."""
+    from a1.proxy.request_models import ChatCompletionRequest, MessageInput
+    import time
+
+    results = []
+    for model_name in models:
+        provider = provider_registry.get_provider_for_model(model_name)
+        if not provider:
+            results.append({"model": model_name, "error": "No provider found"})
+            continue
+        try:
+            req = ChatCompletionRequest(
+                model=model_name,
+                messages=[MessageInput(role="user", content=prompt)],
+                max_tokens=max_tokens,
+            )
+            start = time.time()
+            resp = await provider.complete(req)
+            latency = int((time.time() - start) * 1000)
+            results.append({
+                "model": model_name,
+                "provider": provider.name,
+                "content": resp.choices[0].message.content if resp.choices else "",
+                "latency_ms": latency,
+                "prompt_tokens": resp.usage.prompt_tokens,
+                "completion_tokens": resp.usage.completion_tokens,
+            })
+        except Exception as e:
+            results.append({"model": model_name, "error": str(e)})
+
+    return {"results": results}
+
+
 # --- Metrics ---
 @router.get("/metrics")
 async def get_metrics():

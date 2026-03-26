@@ -8,6 +8,8 @@ import {
   BarChartOutlined,
   ImportOutlined,
   SettingOutlined,
+  TeamOutlined,
+  AppstoreOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../../stores/authStore';
@@ -18,6 +20,8 @@ const allItems = [
   { key: '/conversations', icon: <MessageOutlined />, label: 'Conversations' },
   { key: '/routing', icon: <BranchesOutlined />, label: 'Routing' },
   { key: '/providers', icon: <CloudServerOutlined />, label: 'Providers' },
+  { key: '/accounts', icon: <TeamOutlined />, label: 'Accounts' },
+  { key: '/models', icon: <AppstoreOutlined />, label: 'Models' },
   { key: '/training', icon: <ExperimentOutlined />, label: 'Training' },
   { key: '/analytics', icon: <BarChartOutlined />, label: 'Analytics' },
   { key: '/import', icon: <ImportOutlined />, label: 'Import' },
