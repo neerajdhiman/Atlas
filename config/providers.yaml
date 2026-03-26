@@ -1,4 +1,5 @@
 providers:
+  # --- External Providers (paid, API keys required) ---
   anthropic:
     enabled: true
     models:
@@ -47,6 +48,16 @@ providers:
         supports_tools: true
         supports_streaming: true
 
+  # --- Local Servers (free, auto-discovered from Ollama) ---
   ollama:
     enabled: true
-    models: []  # auto-discovered from Ollama API
+    servers:
+      - url: http://10.0.0.9:11434
+        name: alpheric
+        description: Code generation and general tasks
+        # Models: deepseek-coder-v2:16b, deepseek-coder:6.7b, llama3.2, nomic-embed-text
+      - url: http://10.0.0.10:11434
+        name: alpheric.com
+        description: QA, security, reasoning, DevOps
+        # Models: codellama:13b, deepseek-r1:8b, mistral:7b
+    models: []  # auto-discovered

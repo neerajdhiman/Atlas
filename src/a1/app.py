@@ -28,6 +28,27 @@ async def lifespan(app: FastAPI):
     from a1.providers.registry import provider_registry
     await provider_registry.initialize()
 
+    # Warm up local Ollama models (background, non-blocking)
+    if settings.warm_up_models:
+        from a1.common.logging import get_logger
+        log = get_logger("startup")
+        log.info(f"Warming up {len(settings.warm_up_models)} models...")
+
+        async def _warm_up():
+            import httpx
+            for model in settings.warm_up_models:
+                ollama = provider_registry.get_provider("ollama")
+                if ollama:
+                    server_url = ollama.get_server_for_model(model)
+                    try:
+                        async with httpx.AsyncClient(base_url=server_url, timeout=300.0) as client:
+                            await client.post("/api/generate", json={"model": model, "prompt": "hi", "options": {"num_predict": 1}})
+                        log.info(f"  Warmed up {model} on {server_url}")
+                    except Exception as e:
+                        log.warning(f"  Failed to warm up {model}: {e}")
+
+        asyncio.create_task(_warm_up())
+
     yield
 
     # Cleanup

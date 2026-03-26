@@ -1,0 +1,100 @@
+services:
+  # --- Core Infrastructure ---
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: a1_trainer
+      POSTGRES_USER: a1
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-a1_prod_secure_password}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U a1 -d a1_trainer"]
+      interval: 10s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:-a1_redis_secure}
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-a1_redis_secure}", "ping"]
+      interval: 10s
+      retries: 5
+
+  # --- A1 Trainer Backend ---
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    env_file: .env.prod
+    environment:
+      A1_DATABASE_URL: postgresql+asyncpg://a1:${POSTGRES_PASSWORD:-a1_prod_secure_password}@postgres:5432/a1_trainer
+      A1_REDIS_URL: redis://:${REDIS_PASSWORD:-a1_redis_secure}@redis:6379/0
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      retries: 3
+    volumes:
+      - training_data:/app/training_outputs
+      - cache_data:/app/cache
+
+  # --- Dashboard (built static, served by Nginx) ---
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - dashboard_build:/usr/share/nginx/html
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost/health"]
+      interval: 15s
+      retries: 3
+
+  # --- Optional Services ---
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    restart: always
+    ports:
+      - "127.0.0.1:16686:16686"
+      - "127.0.0.1:4317:4317"
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    profiles: ["observability"]
+
+  argilla:
+    image: argilla/argilla-server:latest
+    restart: always
+    ports:
+      - "127.0.0.1:6900:6900"
+    environment:
+      ARGILLA_AUTH_SECRET_KEY: ${ARGILLA_SECRET:-a1_argilla_prod_secret}
+    profiles: ["feedback"]
+
+volumes:
+  pgdata:
+  redisdata:
+  training_data:
+  cache_data:
+  dashboard_build:

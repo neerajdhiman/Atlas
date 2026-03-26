@@ -1,38 +1,73 @@
-# Default routing policy (used before ML classifier has enough data)
+# A1 Trainer Routing Policy
+# Routes tasks to the best model based on type
+# Local models (free) are preferred when quality is sufficient
+
 default_strategy: best_quality
 
-# Task type -> preferred model (cold start defaults)
+# Task type -> preferred model + fallback chain
+# Order: try local first (free), then external (paid)
 task_defaults:
   code:
-    model: claude-sonnet-4-20250514
-    fallback: [gpt-4o, o3-mini]
-  chat:
-    model: gpt-4o-mini
-    fallback: [claude-haiku-4-5-20251001]
-  analysis:
-    model: claude-sonnet-4-20250514
-    fallback: [gpt-4o]
-  creative:
-    model: claude-sonnet-4-20250514
-    fallback: [gpt-4o]
-  summarization:
-    model: gpt-4o-mini
-    fallback: [claude-haiku-4-5-20251001]
-  translation:
-    model: gpt-4o
-    fallback: [claude-sonnet-4-20250514]
-  math:
-    model: o3-mini
-    fallback: [claude-sonnet-4-20250514, gpt-4o]
-  structured_extraction:
-    model: gpt-4o
-    fallback: [claude-sonnet-4-20250514]
-  general:
-    model: gpt-4o-mini
-    fallback: [claude-haiku-4-5-20251001]
+    model: deepseek-coder-v2:16b         # Server 1 (local, free, best for code)
+    fallback:
+      - deepseek-coder:6.7b              # Server 1 (local, lighter fallback)
+      - codellama:13b                     # Server 2 (local, code review)
+      - claude-sonnet-4-20250514          # External (paid, highest quality)
+      - gpt-4o                            # External (paid)
 
-# Exploration rate for epsilon-greedy
+  chat:
+    model: llama3.2:latest                # Server 1 (local, fast for chat)
+    fallback:
+      - mistral:7b                        # Server 2 (local)
+      - gpt-4o-mini                       # External (cheap)
+      - claude-haiku-4-5-20251001         # External (cheap)
+
+  analysis:
+    model: deepseek-r1:8b                 # Server 2 (local, reasoning)
+    fallback:
+      - deepseek-coder-v2:16b            # Server 1 (local)
+      - claude-sonnet-4-20250514          # External (best for analysis)
+      - gpt-4o                            # External
+
+  creative:
+    model: mistral:7b                     # Server 2 (local)
+    fallback:
+      - llama3.2:latest                   # Server 1 (local)
+      - claude-sonnet-4-20250514          # External
+
+  summarization:
+    model: llama3.2:latest                # Server 1 (local, fast)
+    fallback:
+      - mistral:7b                        # Server 2 (local)
+      - gpt-4o-mini                       # External (cheap)
+
+  translation:
+    model: mistral:7b                     # Server 2 (local, multilingual)
+    fallback:
+      - llama3.2:latest                   # Server 1 (local)
+      - gpt-4o                            # External
+
+  math:
+    model: deepseek-r1:8b                 # Server 2 (local, reasoning)
+    fallback:
+      - deepseek-coder-v2:16b            # Server 1 (local)
+      - o3-mini                           # External (strong math)
+      - claude-sonnet-4-20250514          # External
+
+  structured_extraction:
+    model: deepseek-coder:6.7b            # Server 1 (local, structured output)
+    fallback:
+      - mistral:7b                        # Server 2 (local)
+      - gpt-4o                            # External
+
+  general:
+    model: llama3.2:latest                # Server 1 (local, fast general)
+    fallback:
+      - mistral:7b                        # Server 2 (local)
+      - gpt-4o-mini                       # External (cheap)
+
+# Exploration rate: 10% of requests try non-optimal models for data collection
 exploration_rate: 0.1
 
-# Fallback: always try local Ollama as last resort
+# Always try local Ollama as last resort
 global_fallback: local

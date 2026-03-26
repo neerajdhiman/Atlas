@@ -25,11 +25,12 @@ def _get_provider_for(model: str) -> str:
     """Resolve provider name for a model."""
     if model in MODEL_PROVIDER_MAP:
         return MODEL_PROVIDER_MAP[model]
-    # Check if Ollama has it
-    ollama = provider_registry.get_provider("ollama")
-    if ollama and ollama.supports_model(model):
-        return "ollama"
-    return "openai"  # fallback
+    # Check if any provider supports it (Ollama models like deepseek-coder:6.7b)
+    for name in ["ollama", "anthropic", "openai", "vertex"]:
+        provider = provider_registry.get_provider(name)
+        if provider and provider.supports_model(model):
+            return name
+    return "ollama"  # fallback to local
 
 
 async def select_model(task_type: str, strategy: str) -> tuple[str, str]:
