@@ -100,15 +100,15 @@ class OllamaProvider(LLMProvider):
         """Get the HTTP client for the server that has this model."""
         server = self._model_to_server.get(model)
         if server:
-            return httpx.AsyncClient(base_url=server.url, timeout=120.0), server.url
+            return httpx.AsyncClient(base_url=server.url, timeout=300.0), server.url
 
         # Model name "local" — use first healthy server
         for s in self._servers:
             if s.healthy and s.models:
-                return httpx.AsyncClient(base_url=s.url, timeout=120.0), s.url
+                return httpx.AsyncClient(base_url=s.url, timeout=300.0), s.url
 
         # Fallback to primary
-        return httpx.AsyncClient(base_url=settings.ollama_base_url, timeout=120.0), settings.ollama_base_url
+        return httpx.AsyncClient(base_url=settings.ollama_base_url, timeout=300.0), settings.ollama_base_url
 
     def get_server_for_model(self, model: str) -> str:
         """Get the server URL for a model (for display/logging)."""
