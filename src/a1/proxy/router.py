@@ -89,21 +89,17 @@ async def chat_completions(
     # Determine strategy
     strategy = request.strategy or "best_quality"
 
-    # Alpheric-1: distillation pipeline (Claude → local training)
+    # Alpheric-1: ALWAYS use Claude distillation when enabled
     if request.model == "alpheric-1":
         if settings.distillation_enabled:
-            from a1.training.auto_trainer import should_use_local, handle_dual_execution
+            from a1.training.auto_trainer import handle_dual_execution
             task_type_pre, confidence_pre = classify_task(request)
-
-            use_local = await should_use_local(task_type_pre)
-            if not use_local:
-                # Send to Claude Opus, return response, train local in background
-                dual_result = await handle_dual_execution(
-                    request, response, task_type_pre, confidence_pre,
-                )
-                if dual_result is not None:
-                    return dual_result
-                # If dual_result is None, Claude was unavailable — fall through to auto
+            dual_result = await handle_dual_execution(
+                request, response, task_type_pre, confidence_pre,
+            )
+            if dual_result is not None:
+                return dual_result
+            # If dual_result is None, Claude was unavailable — fall through to auto
 
         # Fallback: route to best local model
         request.model = "auto"
@@ -354,35 +350,31 @@ async def responses_api(
     if not messages:
         messages.append(MessageInput(role="user", content="Hello"))
 
-    # Route alpheric-1: distillation or auto
+    # Route alpheric-1: ALWAYS use Claude when distillation is enabled
     if model == "alpheric-1":
         if settings.distillation_enabled:
-            # Build a temp request to classify, then potentially use Claude
             from a1.proxy.request_models import MessageInput as _MI
+            from a1.training.auto_trainer import handle_dual_execution
             temp_msgs = [_MI(role=m.role, content=m.content) for m in messages]
             temp_req = ChatCompletionRequest(model="auto", messages=temp_msgs, max_tokens=max_tokens)
-            from a1.training.auto_trainer import should_use_local, handle_dual_execution
             task_type_pre, _ = classify_task(temp_req)
-            use_local = await should_use_local(task_type_pre)
-            if not use_local:
-                dual_result = await handle_dual_execution(temp_req, response, task_type_pre, 0.8)
-                if dual_result is not None:
-                    # Convert to Responses API format
-                    assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
-                    resp_id = f"resp_{uuid.uuid4().hex[:12]}"
-                    return {
-                        "id": resp_id, "object": "response", "created_at": int(time.time()),
-                        "model": dual_result.model,
-                        "output": [{"type": "message", "id": f"msg_{uuid.uuid4().hex[:8]}",
-                                    "role": "assistant", "content": [{"type": "output_text", "text": assistant_text}],
-                                    "status": "completed"}],
-                        "status": "completed",
-                        "usage": {"input_tokens": dual_result.usage.prompt_tokens,
-                                  "output_tokens": dual_result.usage.completion_tokens,
-                                  "total_tokens": dual_result.usage.total_tokens},
-                        "metadata": {"provider": "claude-cli", "is_local": False,
-                                     "task_type": task_type_pre, "distillation": True},
-                    }
+            dual_result = await handle_dual_execution(temp_req, response, task_type_pre, 0.8)
+            if dual_result is not None:
+                assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
+                resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+                return {
+                    "id": resp_id, "object": "response", "created_at": int(time.time()),
+                    "model": dual_result.model,
+                    "output": [{"type": "message", "id": f"msg_{uuid.uuid4().hex[:8]}",
+                                "role": "assistant", "content": [{"type": "output_text", "text": assistant_text}],
+                                "status": "completed"}],
+                    "status": "completed",
+                    "usage": {"input_tokens": dual_result.usage.prompt_tokens,
+                              "output_tokens": dual_result.usage.completion_tokens,
+                              "total_tokens": dual_result.usage.total_tokens},
+                    "metadata": {"provider": "claude-cli", "is_local": False,
+                                 "task_type": task_type_pre, "distillation": True},
+                }
         model = "auto"
 
     # Build ChatCompletionRequest
