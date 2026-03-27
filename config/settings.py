@@ -86,6 +86,14 @@ class Settings(BaseSettings):
     key_pool_strategy: str = "round_robin"  # round_robin, least_used, priority, budget_aware
     encryption_key: str = ""  # Fernet key for encrypting stored API keys
 
+    # Distillation / Auto-training pipeline
+    distillation_enabled: bool = True
+    distillation_claude_model: str = "claude-opus-4-20250514"  # teacher model
+    distillation_min_samples: int = 100  # per task type before training triggers
+    distillation_quality_threshold: float = 0.7  # min similarity to use as training data
+    distillation_handoff_increment: float = 0.1  # +10% local handoff per successful training
+    distillation_max_handoff_pct: float = 0.9  # never exceed 90% local (keep 10% monitoring)
+
     # Multi-model management
     warm_up_models: list[str] = []  # Ollama models to preload on startup
     reference_external_model: str = "gpt-4o-mini"  # for savings calculation

@@ -13,6 +13,7 @@ from a1.common.metrics import metrics
 from a1.db.repositories import ConversationRepo, MessageRepo, QualityRepo, RoutingRepo, TrainingRepo
 from a1.dependencies import get_db
 from a1.providers.registry import provider_registry
+from config.settings import settings
 
 log = get_logger("dashboard")
 router = APIRouter(prefix="/admin", tags=["dashboard"])
@@ -637,6 +638,64 @@ async def playground(body: dict):
 
 
 # --- Server Status ---
+# --- Distillation Pipeline ---
+@router.get("/distillation/overview")
+async def distillation_overview(db: AsyncSession = Depends(get_db)):
+    """Per-task-type distillation status: sample counts, handoff %, training status."""
+    from a1.db.repositories import TaskTypeReadinessRepo, DualExecutionRepo
+    readiness_repo = TaskTypeReadinessRepo(db)
+    dual_repo = DualExecutionRepo(db)
+
+    task_types = await readiness_repo.list_all()
+    result = []
+    for tt in task_types:
+        total = await dual_repo.count_by_task_type(tt.task_type)
+        result.append({
+            "task_type": tt.task_type,
+            "claude_samples": tt.claude_sample_count,
+            "total_comparisons": total,
+            "local_handoff_pct": round(tt.local_handoff_pct * 100, 1),
+            "local_avg_quality": round(tt.local_avg_quality, 3),
+            "best_local_model": tt.best_local_model,
+            "last_training_run_id": tt.last_training_run_id,
+            "training_threshold": settings.distillation_min_samples,
+            "ready_for_training": tt.claude_sample_count >= settings.distillation_min_samples,
+        })
+
+    return {
+        "enabled": settings.distillation_enabled,
+        "teacher_model": settings.distillation_claude_model,
+        "min_samples": settings.distillation_min_samples,
+        "max_handoff_pct": settings.distillation_max_handoff_pct * 100,
+        "task_types": result,
+    }
+
+
+@router.post("/distillation/trigger-training/{task_type}")
+async def trigger_distillation_training(task_type: str, db: AsyncSession = Depends(get_db)):
+    """Manually trigger training for a task type."""
+    from a1.db.repositories import TrainingRepo
+    config = {
+        "base_model": settings.training_base_model,
+        "lora_rank": settings.training_lora_rank,
+        "epochs": 3,
+        "task_type": task_type,
+        "distillation": True,
+    }
+    repo = TrainingRepo(db)
+    run = await repo.create_run(base_model=config["base_model"], dataset_size=0, config=config)
+    return {"id": str(run.id), "status": "pending", "task_type": task_type}
+
+
+@router.post("/distillation/handoff/{task_type}")
+async def set_handoff_percentage(task_type: str, pct: float = Query(..., ge=0, le=100), db: AsyncSession = Depends(get_db)):
+    """Manually override handoff percentage for a task type."""
+    from a1.db.repositories import TaskTypeReadinessRepo
+    repo = TaskTypeReadinessRepo(db)
+    await repo.update_handoff(task_type, pct / 100.0)
+    return {"task_type": task_type, "handoff_pct": pct}
+
+
 @router.get("/servers")
 async def server_status():
     """Get status of all infrastructure servers."""

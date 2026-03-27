@@ -243,7 +243,62 @@ class UsageHourlyRollup(Base):
     p99_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+# --- Distillation Pipeline ---
+
+class DualExecutionRecord(Base):
+    """Tracks dual execution: Claude response + local model response for the same request."""
+    __tablename__ = "dual_execution_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Request info
+    request_messages: Mapped[dict] = mapped_column(JSONB, nullable=False)  # original messages
+
+    # Claude (teacher) side
+    claude_model: Mapped[str] = mapped_column(String(128), nullable=False)
+    claude_response: Mapped[str] = mapped_column(Text, nullable=False)
+    claude_latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    claude_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    claude_completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Local (student) side
+    local_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    local_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    local_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    local_completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Comparison scoring
+    similarity_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0-1 cosine
+    quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # auto-evaluated
+    used_for_training: Mapped[bool] = mapped_column(default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TaskTypeReadiness(Base):
+    """Per-task-type training readiness and graduated handoff tracking."""
+    __tablename__ = "task_type_readiness"
+    __table_args__ = (UniqueConstraint("task_type"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    claude_sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    local_avg_quality: Mapped[float] = mapped_column(Float, default=0.0)
+    local_handoff_pct: Mapped[float] = mapped_column(Float, default=0.0)  # 0.0 to 1.0
+    best_local_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    last_training_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 # Indexes
+Index("ix_dual_exec_task_type", DualExecutionRecord.task_type)
+Index("ix_dual_exec_created", DualExecutionRecord.created_at)
+Index("ix_task_readiness_task", TaskTypeReadiness.task_type)
 Index("ix_messages_conversation_seq", Message.conversation_id, Message.sequence)
 Index("ix_routing_decisions_created", RoutingDecision.created_at)
 Index("ix_routing_decisions_task_type", RoutingDecision.task_type)

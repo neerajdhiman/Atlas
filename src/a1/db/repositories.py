@@ -7,10 +7,12 @@ from sqlalchemy.orm import selectinload
 
 from a1.db.models import (
     Conversation,
+    DualExecutionRecord,
     Message,
     ModelPerformance,
     QualitySignal,
     RoutingDecision,
+    TaskTypeReadiness,
     TrainingRun,
 )
 
@@ -132,3 +134,77 @@ class TrainingRepo:
             for k, v in kwargs.items():
                 setattr(run, k, v)
             await self.session.flush()
+
+
+class DualExecutionRepo:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create(self, **kwargs) -> DualExecutionRecord:
+        record = DualExecutionRecord(**kwargs)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def count_by_task_type(self, task_type: str, min_quality: float = 0.0) -> int:
+        stmt = select(func.count(DualExecutionRecord.id)).where(
+            DualExecutionRecord.task_type == task_type,
+            DualExecutionRecord.similarity_score >= min_quality,
+        )
+        result = await self.session.execute(stmt)
+        return result.scalar() or 0
+
+    async def get_recent(self, task_type: str | None = None, limit: int = 50) -> list[DualExecutionRecord]:
+        stmt = select(DualExecutionRecord).order_by(DualExecutionRecord.created_at.desc()).limit(limit)
+        if task_type:
+            stmt = stmt.where(DualExecutionRecord.task_type == task_type)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_unused_for_training(self, task_type: str, min_quality: float = 0.7, limit: int = 10000) -> list[DualExecutionRecord]:
+        stmt = (
+            select(DualExecutionRecord)
+            .where(
+                DualExecutionRecord.task_type == task_type,
+                DualExecutionRecord.similarity_score != None,
+                DualExecutionRecord.used_for_training == False,
+            )
+            .order_by(DualExecutionRecord.created_at.desc())
+            .limit(limit)
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+
+class TaskTypeReadinessRepo:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def get_or_create(self, task_type: str) -> TaskTypeReadiness:
+        stmt = select(TaskTypeReadiness).where(TaskTypeReadiness.task_type == task_type)
+        result = await self.session.execute(stmt)
+        record = result.scalar_one_or_none()
+        if not record:
+            record = TaskTypeReadiness(task_type=task_type)
+            self.session.add(record)
+            await self.session.flush()
+        return record
+
+    async def update_handoff(self, task_type: str, handoff_pct: float, best_model: str | None = None) -> None:
+        record = await self.get_or_create(task_type)
+        record.local_handoff_pct = handoff_pct
+        if best_model:
+            record.best_local_model = best_model
+        await self.session.flush()
+
+    async def increment_sample_count(self, task_type: str) -> int:
+        record = await self.get_or_create(task_type)
+        record.claude_sample_count += 1
+        await self.session.flush()
+        return record.claude_sample_count
+
+    async def list_all(self) -> list[TaskTypeReadiness]:
+        result = await self.session.execute(
+            select(TaskTypeReadiness).order_by(TaskTypeReadiness.task_type)
+        )
+        return list(result.scalars().all())
