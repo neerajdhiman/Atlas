@@ -119,32 +119,12 @@ class ProviderRegistry:
         except Exception as e:
             log.warning(f"Failed to register Claude CLI provider: {e}")
 
-        # OpenClaw gateway (if configured)
-        if settings.openclaw_url:
-            from a1.providers.openclaw import OpenClawProvider
-            openclaw = OpenClawProvider()
-            await openclaw.discover_models()
-            self._providers["openclaw"] = openclaw
-            log.info(f"Registered OpenClaw provider at {settings.openclaw_url}")
-
         # Initial health check
         await self.refresh_health()
 
     async def _register_litellm_providers(self):
         """Register LiteLLM-backed providers (default)."""
         from a1.providers.litellm_provider import LiteLLMProvider
-
-        # Try to get Anthropic API key: env var first, then Claude CLI credentials
-        anthropic_key = settings.anthropic_api_key
-        if not anthropic_key:
-            anthropic_key = _get_claude_cli_key()
-
-        if anthropic_key:
-            models = _load_provider_models("anthropic")
-            self._providers["anthropic"] = LiteLLMProvider(
-                name="anthropic", models=models, api_key=anthropic_key,
-            )
-            log.info(f"Registered Anthropic via LiteLLM ({len(models)} models)")
 
         if settings.openai_api_key:
             models = _load_provider_models("openai")
