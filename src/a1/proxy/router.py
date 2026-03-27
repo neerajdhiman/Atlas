@@ -384,10 +384,42 @@ async def responses_api(
 
     log.info(f"[responses] Routing to {provider_name}/{model_name} (task={task_type})")
 
-    # Execute
-    result = await provider.complete(chat_req)
-    latency_ms = int((time.time() - start_time) * 1000)
+    # Execute with error handling
+    try:
+        result = await provider.complete(chat_req)
+    except Exception as e:
+        latency_ms = int((time.time() - start_time) * 1000)
+        log.error(f"[responses] Provider error: {e}")
+        metrics.record_request(
+            provider_name, model_name, task_type, latency_ms, 0.0, 0, 0,
+            is_local=is_local, error=True,
+        )
+        resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+        return {
+            "id": resp_id,
+            "object": "response",
+            "created_at": int(time.time()),
+            "model": model_name,
+            "output": [
+                {
+                    "type": "message",
+                    "id": f"msg_{uuid.uuid4().hex[:8]}",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": f"Error: Model {model_name} is loading. Please retry in a few seconds.",
+                        }
+                    ],
+                    "status": "completed",
+                }
+            ],
+            "status": "completed",
+            "error": {"type": "timeout", "message": str(e)},
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        }
 
+    latency_ms = int((time.time() - start_time) * 1000)
     assistant_text = result.choices[0].message.content if result.choices else ""
 
     # Record metrics
