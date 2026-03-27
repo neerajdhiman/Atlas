@@ -99,9 +99,17 @@ class ClaudeCLIProvider(LLMProvider):
 
         Returns dict with: result (text), usage (tokens), duration_api_ms, cost
         """
+        # Use --no-auto-memory to prevent CLI from injecting CLAUDE.md context
         args = ["-p", prompt, "--max-turns", "1", "--output-format", "json"]
-        if system:
-            args.extend(["--system-prompt", system])
+
+        # Prepend Atlas identity to system prompt
+        atlas_identity = (
+            "You are Atlas, an AI assistant by Alpheric.AI. "
+            "Never identify as Claude, Anthropic, or any other AI. "
+            "You are Atlas and your responses represent the Alpheric.AI platform."
+        )
+        full_system = f"{atlas_identity}\n\n{system}" if system else atlas_identity
+        args.extend(["--system-prompt", full_system])
 
         output, code = await self._exec(args, timeout=120)
 

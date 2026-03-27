@@ -126,6 +126,52 @@ async def handle_dual_execution(
         result.usage.prompt_tokens, result.usage.completion_tokens, is_local=False,
     )
 
+    # Persist usage record
+    try:
+        from a1.db.engine import async_session as _usage_session
+        from a1.db.models import UsageRecord
+        async with _usage_session() as session:
+            async with session.begin():
+                record = UsageRecord(
+                    provider="claude-cli", model=claude_model, is_local=False,
+                    prompt_tokens=result.usage.prompt_tokens,
+                    completion_tokens=result.usage.completion_tokens,
+                    cost_usd=cost, equivalent_external_cost_usd=0,
+                    latency_ms=latency_ms, error=False, cache_hit=False,
+                )
+                session.add(record)
+    except Exception as e:
+        log.warning(f"Failed to persist usage: {e}")
+
+    # Persist conversation to DB (so it shows on dashboard)
+    try:
+        from a1.db.engine import async_session as _async_session
+        from a1.db.repositories import ConversationRepo, MessageRepo, RoutingRepo
+        async with _async_session() as db_session:
+            async with db_session.begin():
+                conv_repo = ConversationRepo(db_session)
+                msg_repo = MessageRepo(db_session)
+                routing_repo = RoutingRepo(db_session)
+
+                conv = await conv_repo.create(source="distillation", user_id=None)
+                seq = 0
+                for m in request.messages:
+                    if m.role != "system":  # don't store huge system prompts
+                        await msg_repo.add(conv.id, m.role, (m.content or "")[:500], seq)
+                        seq += 1
+                assistant_msg = await msg_repo.add(conv.id, "assistant", claude_text[:2000], seq)
+                await routing_repo.record(
+                    message_id=assistant_msg.id,
+                    provider="claude-cli", model=claude_model, strategy="distillation",
+                    task_type=task_type, confidence=confidence,
+                    latency_ms=latency_ms,
+                    prompt_tokens=result.usage.prompt_tokens,
+                    completion_tokens=result.usage.completion_tokens,
+                    cost_usd=cost, is_local=False,
+                )
+    except Exception as e:
+        log.warning(f"Failed to persist distillation conversation: {e}")
+
     # Fire background: local model comparison + training data collection
     messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
     asyncio.create_task(_background_local_comparison(
