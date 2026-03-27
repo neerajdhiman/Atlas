@@ -57,7 +57,14 @@ async def select_model(task_type: str, strategy: str) -> tuple[str, str]:
             if provider_registry.is_healthy(fb_provider):
                 return fb_model, fb_provider
 
-        # Last resort: any healthy provider
+        # Last resort: prefer fast English models
+        PREFERRED_FALLBACKS = ["llama3.2:latest", "mistral:7b", "deepseek-coder:6.7b"]
+        for pref in PREFERRED_FALLBACKS:
+            for name, provider in provider_registry.healthy_providers.items():
+                if provider.supports_model(pref):
+                    return pref, name
+
+        # Any healthy model
         for name, provider in provider_registry.healthy_providers.items():
             models = provider.list_models()
             if models:

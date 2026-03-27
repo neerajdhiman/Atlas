@@ -198,7 +198,10 @@ class ClaudeCLIProvider(LLMProvider):
         full_system = f"{atlas_identity}\n\n{system_prompt}" if system_prompt else atlas_identity
 
         chunk_id = f"chatcmpl-cli-{uuid.uuid4().hex[:8]}"
-        import sys
+        import os, sys
+
+        # Force UTF-8 for emoji/unicode handling on Windows
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LANG": "en_US.UTF-8"}
 
         # Start CLI in text streaming mode (tokens arrive as they're generated)
         cmd = [self._cli_path, "-p", user_prompt, "--max-turns", "1", "--system-prompt", full_system]
@@ -207,12 +210,14 @@ class ClaudeCLIProvider(LLMProvider):
                 " ".join(f'"{a}"' if " " in a else a for a in cmd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
         else:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
 
         yield ChatCompletionChunk(
@@ -256,20 +261,25 @@ class ClaudeCLIProvider(LLMProvider):
 
     async def _exec(self, args: list[str], timeout: float = 30) -> tuple[str, int]:
         """Execute CLI command and return (stdout, returncode)."""
-        import sys
+        import os, sys
         cmd = [self._cli_path] + args
+
+        # Force UTF-8 encoding to handle emojis/unicode in Claude responses
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LANG": "en_US.UTF-8"}
+
         if sys.platform == "win32":
-            # Windows needs shell=True for .cmd files
             proc = await asyncio.create_subprocess_shell(
                 " ".join(f'"{a}"' if " " in a else a for a in cmd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
         else:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return stdout.decode("utf-8", errors="replace").strip(), proc.returncode or 0
