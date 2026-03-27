@@ -1,5 +1,18 @@
 import asyncio
+import os
+import sys
 from contextlib import asynccontextmanager
+
+# Force UTF-8 encoding on Windows to handle emojis from Claude CLI
+if sys.platform == "win32":
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    # Also fix stdout/stderr encoding
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
