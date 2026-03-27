@@ -110,6 +110,10 @@ async def chat_completions(
     # Determine strategy
     strategy = request.strategy or "best_quality"
 
+    # Backward compatibility: alpheric-1 → atlas-plan
+    if request.model == "alpheric-1":
+        request.model = "atlas-plan"
+
     # Atlas model family — route through Claude distillation or local fallback
     ATLAS_TASK_MAP = {
         "atlas-plan": "chat",
@@ -396,6 +400,10 @@ async def responses_api(
     if not messages:
         messages.append(MessageInput(role="user", content="Hello"))
 
+    # Backward compatibility: alpheric-1 → atlas-plan
+    if model == "alpheric-1":
+        model = "atlas-plan"
+
     # Atlas model family routing
     ATLAS_TASK_MAP_RESP = {
         "atlas-plan": "chat", "atlas-code": "code", "atlas-secure": "analysis",
@@ -552,6 +560,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
             {"id": "auto", "object": "model", "owned_by": "alpheric.ai", "context_window": 200000},
             {"id": "auto:fast", "object": "model", "owned_by": "alpheric.ai", "context_window": 200000},
             {"id": "auto:cheap", "object": "model", "owned_by": "alpheric.ai", "context_window": 200000},
+            {"id": "alpheric-1", "object": "model", "owned_by": "alpheric.ai", "context_window": 128000, "description": "Legacy alias for atlas-plan"},
             {"id": "local", "object": "model", "owned_by": "alpheric.ai", "context_window": 4096},
         ],
     }
@@ -677,6 +686,10 @@ async def atlas_endpoint(
         masked_dicts, mask_map = pii_masker.mask_messages(messages_dicts)
         # Rebuild MessageInput with masked content
         messages = [MessageInput(role=d["role"], content=d["content"]) for d in masked_dicts]
+
+    # Backward compatibility
+    if model == "alpheric-1":
+        model = "atlas-plan"
 
     # Resolve Atlas model
     if model == "atlas" or model not in ATLAS_TASK_ROUTING:
