@@ -40,6 +40,7 @@ class ConversationRepo:
     async def list_recent(self, limit: int = 50, offset: int = 0) -> list[Conversation]:
         stmt = (
             select(Conversation)
+            .options(selectinload(Conversation.messages))
             .order_by(Conversation.created_at.desc())
             .limit(limit)
             .offset(offset)
