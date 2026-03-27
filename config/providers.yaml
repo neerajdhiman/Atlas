@@ -61,3 +61,23 @@ providers:
         description: QA, security, reasoning, DevOps
         # Models: codellama:13b, deepseek-r1:8b, mistral:7b
     models: []  # auto-discovered
+
+  # --- OpenClaw Gateway (local network AI gateway) ---
+  openclaw:
+    enabled: true
+    url: http://10.0.0.3:18789
+    description: OpenClaw AI gateway — chat history source + model proxy
+    models: []  # auto-discovered via gateway
+
+  # --- Alpheric-1 (unified virtual model) ---
+  # Routes through best available local model via smart routing
+  alpheric:
+    enabled: true
+    models:
+      - name: alpheric-1
+        context_window: 128000
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+        supports_tools: true
+        supports_streaming: true
+        description: "Alpheric unified model — auto-routes to best local LLM"

@@ -17,6 +17,7 @@ const Import = React.lazy(() => import('./pages/Import'));
 const SettingsPage = React.lazy(() => import('./pages/Settings'));
 const Accounts = React.lazy(() => import('./pages/Accounts'));
 const Models = React.lazy(() => import('./pages/Models'));
+const Playground = React.lazy(() => import('./pages/Playground'));
 
 function PageWrapper({ children, skeleton }: { children: React.ReactNode; skeleton?: string }) {
   return (
@@ -47,6 +48,7 @@ export default function App() {
               <Route path="/training" element={<PageWrapper><Training /></PageWrapper>} />
               <Route path="/analytics" element={<PageWrapper><Analytics /></PageWrapper>} />
               <Route path="/import" element={<PageWrapper skeleton="form"><Import /></PageWrapper>} />
+              <Route path="/playground" element={<PageWrapper><Playground /></PageWrapper>} />
               <Route path="/settings" element={<PageWrapper skeleton="form"><SettingsPage /></PageWrapper>} />
             </Routes>
           </AppLayout>

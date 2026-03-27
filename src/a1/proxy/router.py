@@ -88,6 +88,11 @@ async def chat_completions(
     # Determine strategy
     strategy = request.strategy or "best_quality"
 
+    # Route alpheric-1 to best local model via auto-routing
+    if request.model == "alpheric-1":
+        request.model = "auto"
+        strategy = "best_quality"
+
     # Route to model
     is_auto = request.model.startswith("auto") or request.model == "local"
     if is_auto:
@@ -301,6 +306,7 @@ async def list_models(api_key: str = Depends(verify_api_key)):
             for m in models
         ]
         + [
+            {"id": "alpheric-1", "object": "model", "owned_by": "alpheric", "context_window": 128000},
             {"id": "auto", "object": "model", "owned_by": "a1-trainer", "context_window": 200000},
             {"id": "auto:fast", "object": "model", "owned_by": "a1-trainer", "context_window": 200000},
             {"id": "auto:cheap", "object": "model", "owned_by": "a1-trainer", "context_window": 200000},

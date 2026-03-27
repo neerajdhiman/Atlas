@@ -103,4 +103,36 @@ export const exportToArgilla = (datasetName: string) =>
 export const importFromArgilla = (datasetName: string) =>
   api.post('/admin/argilla/import', null, { params: { dataset_name: datasetName } }).then((r) => r.data);
 
+// --- Enhanced Analytics ---
+export const getTokenTimeseries = () => api.get('/admin/analytics/token-timeseries').then((r) => r.data);
+export const getCostTimeseries = () => api.get('/admin/analytics/cost-timeseries').then((r) => r.data);
+export const getRequestHeatmap = () => api.get('/admin/analytics/request-heatmap').then((r) => r.data);
+export const getModelLeaderboard = () => api.get('/admin/analytics/model-leaderboard').then((r) => r.data);
+export const getRecentRequests = (limit = 50) =>
+  api.get('/admin/analytics/recent-requests', { params: { limit } }).then((r) => r.data);
+export const getServerStatus = () => api.get('/admin/servers').then((r) => r.data);
+
+// --- Playground ---
+export const runPlayground = (data: {
+  model: string; prompt: string; system_prompt?: string;
+  temperature?: number; max_tokens?: number;
+}) => api.post('/admin/playground', data, { timeout: 120000 }).then((r) => r.data);
+
+// --- OpenClaw ---
+export const getOpenClawStatus = () => api.get('/admin/openclaw/status').then((r) => r.data);
+export const importOpenClawHistory = (limit = 1000) =>
+  api.post('/admin/openclaw/import-history', null, { params: { limit } }).then((r) => r.data);
+export const discoverOpenClawModels = () =>
+  api.post('/admin/openclaw/discover').then((r) => r.data);
+
+// --- Ollama Management ---
+export const getOllamaModels = () => api.get('/admin/ollama/models').then((r) => r.data);
+
+// --- Accounts ---
+export const getAccounts = () => api.get('/admin/accounts').then((r) => r.data);
+
+// --- Analytics ---
+export const getLocalVsExternal = () => api.get('/admin/analytics/local-vs-external').then((r) => r.data);
+export const getLatencyAnalytics = () => api.get('/admin/analytics/latency').then((r) => r.data);
+
 export default api;

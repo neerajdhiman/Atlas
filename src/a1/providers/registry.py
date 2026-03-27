@@ -51,6 +51,14 @@ class ProviderRegistry:
         self._providers["ollama"] = ollama
         log.info("Registered Ollama provider")
 
+        # OpenClaw gateway (if configured)
+        if settings.openclaw_url:
+            from a1.providers.openclaw import OpenClawProvider
+            openclaw = OpenClawProvider()
+            await openclaw.discover_models()
+            self._providers["openclaw"] = openclaw
+            log.info(f"Registered OpenClaw provider at {settings.openclaw_url}")
+
         # Initial health check
         await self.refresh_health()
 

@@ -29,6 +29,13 @@ class Settings(BaseSettings):
         "http://10.0.0.10:11434",  # alpheric.com — QA/reasoning models (codellama, deepseek-r1, mistral)
     ]
 
+    # OpenClaw gateway
+    openclaw_url: str = ""  # e.g., "http://10.0.0.3:18789"
+    openclaw_token: str = ""  # gateway auth token
+
+    # Alpheric-1 — unified model name exposed by A1 Trainer
+    alpheric_model_name: str = "alpheric-1"
+
     # Proxy auth
     api_keys: list[str] = []  # allowed API keys for proxy access
 

@@ -11,22 +11,27 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    host: '0.0.0.0',
     proxy: {
       '/admin': {
-        target: 'http://localhost:8000',
+        target: 'https://localhost:8000',
         changeOrigin: true,
+        secure: false,
       },
       '/admin/ws': {
-        target: 'ws://localhost:8000',
+        target: 'wss://localhost:8000',
         ws: true,
+        secure: false,
       },
       '/v1': {
-        target: 'http://localhost:8000',
+        target: 'https://localhost:8000',
         changeOrigin: true,
+        secure: false,
       },
       '/health': {
-        target: 'http://localhost:8000',
+        target: 'https://localhost:8000',
         changeOrigin: true,
+        secure: false,
       },
     },
   },

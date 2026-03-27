@@ -553,3 +553,171 @@ async def compare_models(
 @router.get("/metrics")
 async def get_metrics():
     return metrics.snapshot()
+
+
+# --- Enhanced Analytics ---
+@router.get("/analytics/token-timeseries")
+async def token_timeseries():
+    """Token usage over time (per-minute buckets)."""
+    return {"data": metrics.token_timeseries()}
+
+
+@router.get("/analytics/cost-timeseries")
+async def cost_timeseries():
+    """Cost trend over time (per-minute buckets)."""
+    return {"data": metrics.cost_timeseries()}
+
+
+@router.get("/analytics/request-heatmap")
+async def request_heatmap():
+    """Request volume heatmap by day-of-week and hour."""
+    return {"data": metrics.request_heatmap()}
+
+
+@router.get("/analytics/model-leaderboard")
+async def model_leaderboard():
+    """Model performance leaderboard with detailed stats."""
+    return {"data": metrics.model_leaderboard()}
+
+
+@router.get("/analytics/recent-requests")
+async def recent_requests(limit: int = 50):
+    """Recent request history for live feed."""
+    return {"data": metrics.recent_requests(limit=limit)}
+
+
+# --- Prompt Playground ---
+@router.post("/playground")
+async def playground(body: dict):
+    """Test a prompt against any available model."""
+    import time as _time
+    from a1.proxy.request_models import ChatCompletionRequest, MessageInput
+
+    model = body.get("model", "alpheric-1")
+    prompt = body.get("prompt", "")
+    system_prompt = body.get("system_prompt", "")
+    temperature = body.get("temperature", 0.7)
+    max_tokens = body.get("max_tokens", 500)
+
+    messages = []
+    if system_prompt:
+        messages.append(MessageInput(role="system", content=system_prompt))
+    messages.append(MessageInput(role="user", content=prompt))
+
+    provider = provider_registry.get_provider_for_model(model)
+    if not provider:
+        from fastapi import HTTPException
+        raise HTTPException(404, f"No provider for model: {model}")
+
+    req = ChatCompletionRequest(
+        model=model, messages=messages,
+        temperature=temperature, max_tokens=max_tokens,
+    )
+
+    start = _time.time()
+    try:
+        resp = await provider.complete(req)
+        latency = int((_time.time() - start) * 1000)
+        content = resp.choices[0].message.content if resp.choices else ""
+        return {
+            "model": model,
+            "provider": provider.name,
+            "content": content,
+            "latency_ms": latency,
+            "prompt_tokens": resp.usage.prompt_tokens,
+            "completion_tokens": resp.usage.completion_tokens,
+            "total_tokens": resp.usage.total_tokens,
+            "cost_usd": provider.estimate_cost(
+                resp.usage.prompt_tokens, resp.usage.completion_tokens, model
+            ),
+        }
+    except Exception as e:
+        latency = int((_time.time() - start) * 1000)
+        return {"model": model, "error": str(e), "latency_ms": latency}
+
+
+# --- Server Status ---
+@router.get("/servers")
+async def server_status():
+    """Get status of all infrastructure servers."""
+    ollama = provider_registry.get_provider("ollama")
+    openclaw = provider_registry.get_provider("openclaw")
+    servers = []
+    if ollama and hasattr(ollama, "list_servers"):
+        for s in ollama.list_servers():
+            servers.append({**s, "type": "ollama"})
+    if openclaw and hasattr(openclaw, "get_status"):
+        status = openclaw.get_status()
+        servers.append({
+            "url": status.get("url", ""),
+            "healthy": status.get("healthy", False),
+            "models": status.get("models", []),
+            "model_count": status.get("model_count", 0),
+            "type": "openclaw",
+            "name": "OpenClaw Gateway",
+        })
+    return {"data": servers}
+
+
+# --- OpenClaw Integration ---
+@router.get("/openclaw/status")
+async def openclaw_status():
+    """Get OpenClaw gateway status and available models."""
+    openclaw = provider_registry.get_provider("openclaw")
+    if not openclaw:
+        return {"connected": False, "message": "OpenClaw not configured (set A1_OPENCLAW_URL)"}
+    status = openclaw.get_status() if hasattr(openclaw, "get_status") else {}
+    return {"connected": True, **status}
+
+
+@router.post("/openclaw/import-history")
+async def openclaw_import_history(
+    limit: int = 1000,
+    db: AsyncSession = Depends(get_db),
+):
+    """Import chat history from OpenClaw for training data."""
+    openclaw = provider_registry.get_provider("openclaw")
+    if not openclaw or not hasattr(openclaw, "fetch_chat_history"):
+        from fastapi import HTTPException
+        raise HTTPException(400, "OpenClaw not configured")
+
+    conversations = await openclaw.fetch_chat_history(limit=limit)
+    if not conversations:
+        return {"imported": 0, "message": "No conversations found (OpenClaw may need auth token)"}
+
+    # Import conversations into our DB
+    conv_repo = ConversationRepo(db)
+    msg_repo = MessageRepo(db)
+    imported = 0
+    for conv_data in conversations:
+        try:
+            conv = await conv_repo.create(
+                source="openclaw",
+                user_id=conv_data.get("user_id", "openclaw"),
+                metadata={"openclaw_id": conv_data.get("id", "")},
+            )
+            messages = conv_data.get("messages", [])
+            for seq, msg in enumerate(messages):
+                await msg_repo.add(
+                    conv.id,
+                    msg.get("role", "user"),
+                    msg.get("content", ""),
+                    seq,
+                )
+            imported += 1
+        except Exception as e:
+            log.warning(f"Failed to import OpenClaw conversation: {e}")
+            continue
+
+    return {"imported": imported, "total_available": len(conversations)}
+
+
+@router.post("/openclaw/discover")
+async def openclaw_discover():
+    """Trigger model discovery on OpenClaw."""
+    openclaw = provider_registry.get_provider("openclaw")
+    if not openclaw or not hasattr(openclaw, "discover_models"):
+        from fastapi import HTTPException
+        raise HTTPException(400, "OpenClaw not configured")
+    await openclaw.discover_models()
+    return openclaw.get_status() if hasattr(openclaw, "get_status") else {"status": "discovered"}
