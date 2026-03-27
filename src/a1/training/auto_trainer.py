@@ -189,6 +189,30 @@ async def handle_dual_execution(
     return result
 
 
+async def handle_dual_execution_stream(
+    request: ChatCompletionRequest,
+    task_type: str,
+    confidence: float,
+):
+    """Stream response from Claude CLI, fire background comparison.
+
+    Returns an async chunk iterator for true token-by-token streaming.
+    Returns None if Claude is unavailable.
+    """
+    claude_provider = provider_registry.get_provider("claude-cli")
+    if not claude_provider:
+        return None
+
+    claude_model = settings.distillation_claude_model
+    request.model = claude_model
+
+    try:
+        return claude_provider.stream(request)
+    except Exception as e:
+        log.error(f"Claude stream failed: {e}")
+        return None
+
+
 async def _background_local_comparison(
     messages_dicts: list[dict],
     claude_response_text: str,

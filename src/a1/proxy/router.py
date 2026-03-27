@@ -35,11 +35,22 @@ REFERENCE_COST_PER_1K_OUTPUT = 0.0006
 async def _return_response_or_stream(
     stream: bool, resp_id: str, model: str, text: str,
     usage: dict, metadata: dict | None = None,
+    chunk_iterator=None,
 ):
-    """Return either JSON response or SSE stream based on stream flag."""
+    """Return either JSON response or SSE stream based on stream flag.
+
+    If chunk_iterator is provided and stream=True, streams tokens live
+    as they arrive from the provider (true streaming, not buffered).
+    """
     if stream:
-        from a1.proxy.stream import sse_responses_stream
-        return await sse_responses_stream(resp_id, model, text, usage, metadata)
+        from a1.proxy.stream import sse_responses_stream_live
+        return await sse_responses_stream_live(
+            resp_id, model,
+            chunk_iterator=chunk_iterator,
+            full_text=text,
+            usage=usage,
+            metadata=metadata,
+        )
     return {
         "id": resp_id, "object": "response", "created_at": int(time.time()),
         "model": model,
@@ -705,27 +716,38 @@ async def atlas_endpoint(
 
     # Route through distillation (Claude) or local
     if settings.distillation_enabled:
-        from a1.training.auto_trainer import handle_dual_execution
+        resp_id = f"resp_{uuid.uuid4().hex[:12]}"
         temp_req = ChatCompletionRequest(model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature)
+
+        # TRUE STREAMING: if stream=True, pipe Claude CLI tokens directly to client
+        if stream:
+            from a1.training.auto_trainer import handle_dual_execution_stream
+            chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9)
+            if chunk_iter is not None:
+                meta = {"provider": "claude-cli", "is_local": False, "task_type": task_type,
+                        "atlas_model": atlas_model, "distillation": True,
+                        "session_id": session.id if session else None}
+                return await _return_response_or_stream(
+                    True, resp_id, atlas_model, None, {}, meta, chunk_iterator=chunk_iter,
+                )
+
+        # NON-STREAMING: wait for full response
+        from a1.training.auto_trainer import handle_dual_execution
         dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9)
         if dual_result is not None:
             assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
 
-            # Unmask PII in response
             if mask_map:
                 from a1.security.pii_masker import pii_masker
                 assistant_text = pii_masker.unmask(assistant_text, mask_map)
 
-            # Store in session
             if session:
                 user_input = input_data if isinstance(input_data, str) else str(input_data)
                 session.add_message("user", user_input)
                 session.add_message("assistant", assistant_text)
 
             latency_ms = int((time.time() - start_time) * 1000)
-            resp_id = f"resp_{uuid.uuid4().hex[:12]}"
 
-            # Link response to session for chaining
             if session:
                 from a1.session.manager import session_manager
                 session_manager.link_response(resp_id, session.id)
@@ -737,7 +759,7 @@ async def atlas_endpoint(
                     "atlas_model": atlas_model, "distillation": True, "latency_ms": latency_ms,
                     "session_id": session.id if session else None,
                     "pii_masked": len(mask_map) > 0}
-            return await _return_response_or_stream(stream, resp_id, atlas_model, assistant_text, usage, meta)
+            return await _return_response_or_stream(False, resp_id, atlas_model, assistant_text, usage, meta)
 
     # Fallback: route to local model
     temp_req = ChatCompletionRequest(model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature)

@@ -32,18 +32,30 @@ async def sse_responses_stream(
     usage: dict,
     metadata: dict | None = None,
 ) -> StreamingResponse:
-    """Stream a complete response in OpenAI Responses API SSE format.
+    """Stream a complete response in OpenAI Responses API SSE format."""
+    return await sse_responses_stream_live(response_id, model, None, text, usage, metadata)
 
-    Emits events that OpenClaw expects:
-      response.created → response.output_item.added → response.content_part.added
-      → response.output_text.delta (chunked) → response.output_text.done
-      → response.content_part.done → response.output_item.done → response.completed
+
+async def sse_responses_stream_live(
+    response_id: str,
+    model: str,
+    chunk_iterator=None,
+    full_text: str | None = None,
+    usage: dict | None = None,
+    metadata: dict | None = None,
+) -> StreamingResponse:
+    """Stream response as SSE — either from live chunk iterator or pre-built text.
+
+    If chunk_iterator is provided, streams tokens as they arrive from the provider.
+    If full_text is provided, chunks it into ~20 char pieces for simulated streaming.
     """
     msg_id = f"msg_{uuid.uuid4().hex[:8]}"
     item_idx = 0
     content_idx = 0
 
     async def generate():
+        nonlocal full_text, usage
+
         # 1. response.created
         yield _sse_event("response.created", {
             "type": "response.created",
@@ -78,17 +90,46 @@ async def sse_responses_stream(
             "part": {"type": "output_text", "text": ""},
         })
 
-        # 4. Stream text in chunks (~20 chars each for smooth streaming)
-        chunk_size = 20
-        for i in range(0, len(text), chunk_size):
-            chunk = text[i:i + chunk_size]
-            yield _sse_event("response.output_text.delta", {
-                "type": "response.output_text.delta",
-                "item_id": msg_id,
-                "output_index": item_idx,
-                "content_index": content_idx,
-                "delta": chunk,
-            })
+        # 4. Stream deltas — either from live iterator or chunked text
+        accumulated_text = ""
+
+        if chunk_iterator is not None:
+            # Live streaming from provider
+            stream_usage = None
+            async for chunk in chunk_iterator:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    delta = chunk.choices[0].delta.content
+                    accumulated_text += delta
+                    yield _sse_event("response.output_text.delta", {
+                        "type": "response.output_text.delta",
+                        "item_id": msg_id,
+                        "output_index": item_idx,
+                        "content_index": content_idx,
+                        "delta": delta,
+                    })
+                if chunk.usage:
+                    stream_usage = chunk.usage
+            full_text = accumulated_text
+            if stream_usage:
+                usage = {
+                    "input_tokens": stream_usage.prompt_tokens,
+                    "output_tokens": stream_usage.completion_tokens,
+                    "total_tokens": stream_usage.total_tokens,
+                }
+        else:
+            # Simulated streaming from pre-built text
+            text = full_text or ""
+            chunk_size = 20
+            for i in range(0, len(text), chunk_size):
+                chunk = text[i:i + chunk_size]
+                yield _sse_event("response.output_text.delta", {
+                    "type": "response.output_text.delta",
+                    "item_id": msg_id,
+                    "output_index": item_idx,
+                    "content_index": content_idx,
+                    "delta": chunk,
+                })
+            accumulated_text = text
 
         # 5. response.output_text.done
         yield _sse_event("response.output_text.done", {

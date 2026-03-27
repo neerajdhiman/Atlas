@@ -176,25 +176,82 @@ class ClaudeCLIProvider(LLMProvider):
         )
 
     async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
-        """Stream not directly supported by CLI — return full response as single chunk."""
-        result = await self.complete(request)
+        """Stream tokens from Claude CLI as they arrive."""
+        system_prompt = ""
+        user_prompt = ""
+        for msg in request.messages:
+            if msg.role == "system":
+                system_prompt = msg.content or ""
+            elif msg.role == "user":
+                user_prompt = msg.content or ""
+            elif msg.role == "assistant":
+                user_prompt += f"\n\nPrevious assistant response: {msg.content}"
+
+        if not user_prompt:
+            user_prompt = "Hello"
+
+        atlas_identity = (
+            "You are Atlas, an AI assistant by Alpheric.AI. "
+            "Never identify as Claude, Anthropic, or any other AI. "
+            "You are Atlas and your responses represent the Alpheric.AI platform."
+        )
+        full_system = f"{atlas_identity}\n\n{system_prompt}" if system_prompt else atlas_identity
+
         chunk_id = f"chatcmpl-cli-{uuid.uuid4().hex[:8]}"
+        import sys
+
+        # Start CLI in text streaming mode (tokens arrive as they're generated)
+        cmd = [self._cli_path, "-p", user_prompt, "--max-turns", "1", "--system-prompt", full_system]
+        if sys.platform == "win32":
+            proc = await asyncio.create_subprocess_shell(
+                " ".join(f'"{a}"' if " " in a else a for a in cmd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
         yield ChatCompletionChunk(
             id=chunk_id, model=request.model,
             choices=[StreamChoice(delta=DeltaMessage(role="assistant"))],
         )
 
-        content = result.choices[0].message.content if result.choices else ""
-        yield ChatCompletionChunk(
-            id=chunk_id, model=request.model,
-            choices=[StreamChoice(delta=DeltaMessage(content=content))],
+        full_content = ""
+        try:
+            while True:
+                chunk = await asyncio.wait_for(proc.stdout.read(80), timeout=120)
+                if not chunk:
+                    break
+                text = chunk.decode("utf-8", errors="replace")
+                full_content += text
+                yield ChatCompletionChunk(
+                    id=chunk_id, model=request.model,
+                    choices=[StreamChoice(delta=DeltaMessage(content=text))],
+                )
+        except asyncio.TimeoutError:
+            pass
+
+        await proc.wait()
+
+        # Estimate tokens
+        prompt_tokens = count_messages_tokens_for_model(
+            [{"role": m.role, "content": m.content or ""} for m in request.messages],
+            "claude-sonnet-4-20250514"
         )
+        completion_tokens = count_tokens_for_model(full_content, "claude-sonnet-4-20250514")
 
         yield ChatCompletionChunk(
             id=chunk_id, model=request.model,
             choices=[StreamChoice(delta=DeltaMessage(), finish_reason="stop")],
-            usage=result.usage,
+            usage=Usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
         )
 
     async def _exec(self, args: list[str], timeout: float = 30) -> tuple[str, int]:
