@@ -551,3 +551,208 @@ async def list_models(api_key: str = Depends(verify_api_key)):
             {"id": "local", "object": "model", "owned_by": "alpheric.ai", "context_window": 4096},
         ],
     }
+
+
+# --- Atlas Endpoint ---
+# Smart endpoint: auto-selects the right Atlas model based on content
+ATLAS_TASK_ROUTING = {
+    "atlas-plan": {"tasks": ["chat", "general", "creative"], "description": "Planning, discussion, brainstorming"},
+    "atlas-code": {"tasks": ["code", "structured_extraction"], "description": "Code generation, debugging, review"},
+    "atlas-secure": {"tasks": ["analysis", "math"], "description": "Security analysis, reasoning, auditing"},
+    "atlas-infra": {"tasks": ["code"], "description": "Infrastructure, DevOps, deployment"},
+    "atlas-data": {"tasks": ["analysis", "summarization", "math"], "description": "Data analysis, statistics, ETL"},
+    "atlas-books": {"tasks": ["creative", "summarization", "translation"], "description": "Documentation, writing, research"},
+    "atlas-audit": {"tasks": ["structured_extraction", "analysis"], "description": "Compliance auditing, log analysis"},
+}
+
+def _resolve_atlas_model(task_type: str) -> str:
+    """Pick the best Atlas model for a given task type."""
+    # Priority mapping: task_type → best Atlas model
+    TASK_TO_ATLAS = {
+        "chat": "atlas-plan",
+        "general": "atlas-plan",
+        "code": "atlas-code",
+        "structured_extraction": "atlas-audit",
+        "analysis": "atlas-secure",
+        "math": "atlas-data",
+        "creative": "atlas-books",
+        "summarization": "atlas-books",
+        "translation": "atlas-books",
+    }
+    return TASK_TO_ATLAS.get(task_type, "atlas-plan")
+
+
+@router.post("/atlas")
+async def atlas_endpoint(
+    request: dict,
+    response: Response,
+    api_key: str = Depends(verify_api_key),
+):
+    """Alpheric.AI Atlas endpoint — auto-selects the right model.
+
+    Accepts:
+      - model: (optional) specific atlas model, or omit for auto-selection
+      - input: string or message array
+      - instructions: system prompt
+      - max_output_tokens / temperature
+
+    If model is omitted or "atlas", the system classifies the input
+    and picks the best Atlas model automatically.
+    """
+    start_time = time.time()
+
+    model = request.get("model", "atlas")
+    input_data = request.get("input", "")
+    instructions = request.get("instructions", "")
+    temperature = request.get("temperature")
+    max_tokens = request.get("max_output_tokens") or request.get("max_tokens", 1000)
+
+    # Build messages
+    from a1.proxy.request_models import MessageInput
+    messages = []
+    if instructions:
+        messages.append(MessageInput(role="system", content=instructions))
+
+    if isinstance(input_data, str):
+        messages.append(MessageInput(role="user", content=input_data))
+    elif isinstance(input_data, list):
+        for msg in input_data:
+            if isinstance(msg, dict):
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+                messages.append(MessageInput(role=role, content=content))
+            elif isinstance(msg, str):
+                messages.append(MessageInput(role="user", content=msg))
+
+    if not messages:
+        messages.append(MessageInput(role="user", content="Hello"))
+
+    # Resolve Atlas model
+    if model == "atlas" or model not in ATLAS_TASK_ROUTING:
+        # Auto-select based on content classification
+        temp_req = ChatCompletionRequest(model="auto", messages=messages, max_tokens=max_tokens)
+        task_type, confidence = classify_task(temp_req)
+        atlas_model = _resolve_atlas_model(task_type)
+    else:
+        atlas_model = model
+        task_type = ATLAS_TASK_ROUTING[model]["tasks"][0]
+
+    log.info(f"[atlas] {atlas_model} (task={task_type})")
+
+    # Route through distillation (Claude) or local
+    if settings.distillation_enabled:
+        from a1.training.auto_trainer import handle_dual_execution
+        temp_req = ChatCompletionRequest(model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature)
+        dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9)
+        if dual_result is not None:
+            assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
+            latency_ms = int((time.time() - start_time) * 1000)
+            resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+            return {
+                "id": resp_id,
+                "object": "response",
+                "created_at": int(time.time()),
+                "model": atlas_model,
+                "output": [
+                    {
+                        "type": "message",
+                        "id": f"msg_{uuid.uuid4().hex[:8]}",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": assistant_text}],
+                        "status": "completed",
+                    }
+                ],
+                "status": "completed",
+                "usage": {
+                    "input_tokens": dual_result.usage.prompt_tokens,
+                    "output_tokens": dual_result.usage.completion_tokens,
+                    "total_tokens": dual_result.usage.total_tokens,
+                },
+                "metadata": {
+                    "provider": "claude-cli",
+                    "is_local": False,
+                    "task_type": task_type,
+                    "atlas_model": atlas_model,
+                    "distillation": True,
+                    "latency_ms": latency_ms,
+                },
+            }
+
+    # Fallback: route to local model
+    temp_req = ChatCompletionRequest(model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature)
+    task_type_f, _ = classify_task(temp_req)
+    model_name, provider_name = await select_model(task_type_f, "best_quality")
+    provider = provider_registry.get_provider(provider_name)
+
+    if not provider:
+        from fastapi import HTTPException
+        raise HTTPException(404, "No provider available")
+
+    temp_req.model = model_name
+    try:
+        result = await provider.complete(temp_req)
+    except Exception as e:
+        latency_ms = int((time.time() - start_time) * 1000)
+        return {
+            "id": f"resp_{uuid.uuid4().hex[:12]}",
+            "object": "response", "created_at": int(time.time()),
+            "model": atlas_model, "status": "completed",
+            "output": [{"type": "message", "id": f"msg_{uuid.uuid4().hex[:8]}",
+                        "role": "assistant", "content": [{"type": "output_text", "text": f"Error: {e}"}],
+                        "status": "completed"}],
+            "error": {"type": "provider_error", "message": str(e)},
+            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+        }
+
+    latency_ms = int((time.time() - start_time) * 1000)
+    assistant_text = result.choices[0].message.content if result.choices else ""
+    is_local = provider_name == "ollama"
+    cost = provider.estimate_cost(result.usage.prompt_tokens, result.usage.completion_tokens, model_name) if not is_local else 0.0
+
+    metrics.record_request(provider_name, model_name, task_type, latency_ms, cost,
+                           result.usage.prompt_tokens, result.usage.completion_tokens, is_local=is_local)
+
+    response.headers["X-Atlas-Model"] = atlas_model
+    response.headers["X-Atlas-Provider"] = provider_name
+
+    return {
+        "id": f"resp_{uuid.uuid4().hex[:12]}",
+        "object": "response",
+        "created_at": int(time.time()),
+        "model": atlas_model,
+        "output": [{"type": "message", "id": f"msg_{uuid.uuid4().hex[:8]}",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": assistant_text}],
+                    "status": "completed"}],
+        "status": "completed",
+        "usage": {
+            "input_tokens": result.usage.prompt_tokens,
+            "output_tokens": result.usage.completion_tokens,
+            "total_tokens": result.usage.total_tokens,
+        },
+        "metadata": {
+            "provider": provider_name,
+            "actual_model": model_name,
+            "is_local": is_local,
+            "task_type": task_type,
+            "atlas_model": atlas_model,
+            "cost_usd": cost,
+            "latency_ms": latency_ms,
+        },
+    }
+
+
+@router.get("/atlas/models")
+async def atlas_models():
+    """List all Atlas models with their capabilities."""
+    return {
+        "object": "list",
+        "family": "Atlas",
+        "product": "Alpheric.AI",
+        "models": [
+            {**v, "id": k, "context_window": 128000}
+            for k, v in ATLAS_TASK_ROUTING.items()
+        ],
+    }
