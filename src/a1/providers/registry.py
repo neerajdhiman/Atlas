@@ -9,6 +9,61 @@ from config.settings import settings
 log = get_logger("providers.registry")
 
 
+def _get_claude_cli_key() -> str | None:
+    """Try to extract Anthropic API key from Claude CLI credentials.
+
+    Reads ~/.claude/.credentials.json for OAuth token.
+    If the token is expired, attempts to refresh by invoking the CLI.
+    """
+    import json
+    from pathlib import Path
+
+    cred_path = Path.home() / ".claude" / ".credentials.json"
+    if not cred_path.exists():
+        return None
+
+    try:
+        creds = json.loads(cred_path.read_text())
+        oauth = creds.get("claudeAiOauth", {})
+        token = oauth.get("accessToken")
+        expires_at = oauth.get("expiresAt", 0)
+
+        if not token:
+            return None
+
+        # Check if expired
+        import time
+        now_ms = int(time.time() * 1000)
+        if now_ms > expires_at:
+            log.warning("Claude CLI OAuth token expired, attempting refresh via CLI...")
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["claude", "-p", "test", "--max-turns", "1"],
+                    capture_output=True, text=True, timeout=30,
+                )
+                # Re-read credentials after CLI refresh
+                creds = json.loads(cred_path.read_text())
+                oauth = creds.get("claudeAiOauth", {})
+                token = oauth.get("accessToken")
+                new_expires = oauth.get("expiresAt", 0)
+                if new_expires > now_ms:
+                    log.info("Claude CLI OAuth token refreshed successfully")
+                else:
+                    log.warning("Claude CLI token still expired after refresh attempt")
+            except Exception as e:
+                log.warning(f"Failed to refresh Claude CLI token: {e}")
+
+        if token:
+            log.info(f"Using Claude CLI OAuth token (expires: {expires_at})")
+            return token
+
+    except Exception as e:
+        log.warning(f"Failed to read Claude CLI credentials: {e}")
+
+    return None
+
+
 def _load_provider_models(provider_name: str) -> list[ModelInfo]:
     """Load model definitions from config/providers.yaml."""
     try:
@@ -51,6 +106,19 @@ class ProviderRegistry:
         self._providers["ollama"] = ollama
         log.info("Registered Ollama provider")
 
+        # Claude CLI proxy (uses local claude command for auth)
+        try:
+            from a1.providers.claude_cli import ClaudeCLIProvider
+            claude_cli = ClaudeCLIProvider()
+            cli_healthy = await claude_cli.health_check()
+            if cli_healthy:
+                self._providers["claude-cli"] = claude_cli
+                log.info(f"Registered Claude CLI provider ({len(claude_cli.list_models())} models)")
+            else:
+                log.info("Claude CLI not available — skipping")
+        except Exception as e:
+            log.warning(f"Failed to register Claude CLI provider: {e}")
+
         # OpenClaw gateway (if configured)
         if settings.openclaw_url:
             from a1.providers.openclaw import OpenClawProvider
@@ -66,10 +134,15 @@ class ProviderRegistry:
         """Register LiteLLM-backed providers (default)."""
         from a1.providers.litellm_provider import LiteLLMProvider
 
-        if settings.anthropic_api_key:
+        # Try to get Anthropic API key: env var first, then Claude CLI credentials
+        anthropic_key = settings.anthropic_api_key
+        if not anthropic_key:
+            anthropic_key = _get_claude_cli_key()
+
+        if anthropic_key:
             models = _load_provider_models("anthropic")
             self._providers["anthropic"] = LiteLLMProvider(
-                name="anthropic", models=models, api_key=settings.anthropic_api_key,
+                name="anthropic", models=models, api_key=anthropic_key,
             )
             log.info(f"Registered Anthropic via LiteLLM ({len(models)} models)")
 
@@ -125,7 +198,12 @@ class ProviderRegistry:
         return self._providers.get(name)
 
     def get_provider_for_model(self, model: str) -> LLMProvider | None:
-        """Find which provider serves this model."""
+        """Find which provider serves this model. Prefers healthy providers."""
+        # First pass: healthy providers only
+        for name, provider in self._providers.items():
+            if self._health.get(name, False) and provider.supports_model(model):
+                return provider
+        # Second pass: any provider (may be unhealthy but registered)
         for provider in self._providers.values():
             if provider.supports_model(model):
                 return provider

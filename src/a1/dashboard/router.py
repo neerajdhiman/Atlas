@@ -637,6 +637,27 @@ async def playground(body: dict):
 
 
 # --- Server Status ---
+@router.post("/providers/anthropic/refresh-token")
+async def refresh_anthropic_token():
+    """Refresh the Anthropic API key from Claude CLI credentials."""
+    from a1.providers.registry import _get_claude_cli_key
+    key = _get_claude_cli_key()
+    if not key:
+        return {"status": "error", "message": "No Claude CLI credentials found"}
+
+    # Update the Anthropic provider's API key
+    anthropic = provider_registry.get_provider("anthropic")
+    if anthropic and hasattr(anthropic, "_api_key"):
+        anthropic._api_key = key
+        healthy = await anthropic.health_check()
+        return {
+            "status": "ok" if healthy else "unhealthy",
+            "message": f"Token updated, health: {'healthy' if healthy else 'unhealthy'}",
+            "key_prefix": key[:15] + "...",
+        }
+    return {"status": "error", "message": "Anthropic provider not registered"}
+
+
 @router.get("/servers")
 async def server_status():
     """Get status of all infrastructure servers."""
