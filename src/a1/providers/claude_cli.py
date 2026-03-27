@@ -94,9 +94,12 @@ class ClaudeCLIProvider(LLMProvider):
         # Fallback — let the OS find it via shell
         return "claude.cmd" if sys.platform == "win32" else "claude"
 
-    async def _run_claude(self, prompt: str, system: str = "", max_tokens: int = 1000) -> str:
-        """Run the claude CLI with a prompt and return the response text."""
-        args = ["-p", prompt, "--max-turns", "1"]
+    async def _run_claude(self, prompt: str, system: str = "", max_tokens: int = 1000) -> dict:
+        """Run the claude CLI with a prompt and return parsed JSON result.
+
+        Returns dict with: result (text), usage (tokens), duration_api_ms, cost
+        """
+        args = ["-p", prompt, "--max-turns", "1", "--output-format", "json"]
         if system:
             args.extend(["--system-prompt", system])
 
@@ -105,7 +108,22 @@ class ClaudeCLIProvider(LLMProvider):
         if code != 0 and not output:
             raise RuntimeError(f"Claude CLI failed with exit code {code}")
 
-        return output
+        # Parse JSON response for accurate token counts
+        try:
+            import json
+            data = json.loads(output)
+            return {
+                "text": data.get("result", output),
+                "input_tokens": data.get("usage", {}).get("input_tokens", 0),
+                "output_tokens": data.get("usage", {}).get("output_tokens", 0),
+                "cache_read_tokens": data.get("usage", {}).get("cache_read_input_tokens", 0),
+                "cost_usd": data.get("total_cost_usd", 0.0),
+                "api_duration_ms": data.get("duration_api_ms", 0),
+            }
+        except (json.JSONDecodeError, KeyError):
+            # Fallback: treat output as plain text
+            return {"text": output, "input_tokens": 0, "output_tokens": 0,
+                    "cache_read_tokens": 0, "cost_usd": 0.0, "api_duration_ms": 0}
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         # Build prompt from messages
@@ -122,21 +140,25 @@ class ClaudeCLIProvider(LLMProvider):
         if not user_prompt:
             user_prompt = "Hello"
 
-        output = await self._run_claude(
+        result = await self._run_claude(
             user_prompt,
             system=system_prompt,
             max_tokens=request.max_tokens or 1000,
         )
 
-        # Estimate tokens (CLI doesn't report them)
-        messages_dicts = [{"role": m.role, "content": m.content or ""} for m in request.messages]
-        prompt_tokens = count_messages_tokens_for_model(messages_dicts, "claude-sonnet-4-20250514")
-        completion_tokens = count_tokens_for_model(output, "claude-sonnet-4-20250514")
+        # Use accurate token counts from CLI JSON output
+        prompt_tokens = result["input_tokens"] + result["cache_read_tokens"]
+        completion_tokens = result["output_tokens"]
+        if prompt_tokens == 0:
+            # Fallback to estimation
+            messages_dicts = [{"role": m.role, "content": m.content or ""} for m in request.messages]
+            prompt_tokens = count_messages_tokens_for_model(messages_dicts, "claude-sonnet-4-20250514")
+            completion_tokens = count_tokens_for_model(result["text"], "claude-sonnet-4-20250514")
 
         return ChatCompletionResponse(
             id=f"chatcmpl-cli-{uuid.uuid4().hex[:8]}",
             model=request.model,
-            choices=[Choice(message=ChoiceMessage(content=output))],
+            choices=[Choice(message=ChoiceMessage(content=result["text"]))],
             usage=Usage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
