@@ -37,7 +37,7 @@ export default function LoginPage() {
       <Card style={{ width: 400, maxWidth: '100%' }}>
         <div style={{ textAlign: 'center', marginBottom: 32 }}>
           <DashboardOutlined style={{ fontSize: 40, color: '#3b82f6' }} />
-          <Title level={3} style={{ marginTop: 12, marginBottom: 4 }}>A1 Trainer</Title>
+          <Title level={3} style={{ marginTop: 12, marginBottom: 4 }}>Alpheric.AI</Title>
           <Text type="secondary">Sign in to your dashboard</Text>
         </div>
 

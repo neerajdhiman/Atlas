@@ -34,3 +34,4 @@ alembic/versions/*.py
 .claude/settings.local.json
 nginx/ssl/
 nginx/html/
+ssl/

@@ -69,15 +69,71 @@ providers:
     description: OpenClaw AI gateway — chat history source + model proxy
     models: []  # auto-discovered via gateway
 
-  # --- Alpheric-1 (unified virtual model) ---
-  # Routes through best available local model via smart routing
-  alpheric:
+  # --- Atlas Model Family (Alpheric.AI) ---
+  # 7 specialized models, each routes through Claude (teacher) + local (student)
+  atlas:
     enabled: true
     models:
-      - name: alpheric-1
+      - name: atlas-plan
         context_window: 128000
         cost_per_1k_input: 0.0
         cost_per_1k_output: 0.0
         supports_tools: true
         supports_streaming: true
-        description: "Alpheric unified model — auto-routes to best local LLM"
+        task_types: [chat, general]
+        description: "Planning, discussion, brainstorming"
+        local_fallback: llama3.2:latest
+      - name: atlas-code
+        context_window: 128000
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+        supports_tools: true
+        supports_streaming: true
+        task_types: [code, structured_extraction]
+        description: "Code generation, debugging, review"
+        local_fallback: deepseek-coder-v2:16b
+      - name: atlas-secure
+        context_window: 128000
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+        supports_tools: true
+        supports_streaming: true
+        task_types: [analysis, math]
+        description: "Security analysis, reasoning, auditing"
+        local_fallback: deepseek-r1:8b
+      - name: atlas-infra
+        context_window: 128000
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+        supports_tools: true
+        supports_streaming: true
+        task_types: [code]
+        description: "Infrastructure, DevOps, deployment"
+        local_fallback: codellama:13b
+      - name: atlas-data
+        context_window: 128000
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+        supports_tools: true
+        supports_streaming: true
+        task_types: [analysis, summarization, math]
+        description: "Data analysis, statistics, ETL"
+        local_fallback: mistral:7b
+      - name: atlas-books
+        context_window: 128000
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+        supports_tools: true
+        supports_streaming: true
+        task_types: [creative, summarization, translation]
+        description: "Documentation, writing, research"
+        local_fallback: llama3.2:latest
+      - name: atlas-audit
+        context_window: 128000
+        cost_per_1k_input: 0.0
+        cost_per_1k_output: 0.0
+        supports_tools: true
+        supports_streaming: true
+        task_types: [structured_extraction, analysis]
+        description: "Compliance auditing, log analysis, structured extraction"
+        local_fallback: deepseek-coder:6.7b

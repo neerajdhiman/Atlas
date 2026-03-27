@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "A1_", "env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # App
-    app_name: str = "A1 Trainer"
+    app_name: str = "Alpheric.AI"
     debug: bool = False
     host: str = "0.0.0.0"
     port: int = 8000
@@ -23,24 +23,27 @@ class Settings(BaseSettings):
     vertex_location: str = "us-central1"
 
     # Ollama (supports multiple servers)
-    ollama_base_url: str = "http://localhost:11434"  # primary server
+    ollama_base_url: str = "http://localhost:11434"
     ollama_servers: list[str] = [
-        "http://10.0.0.9:11434",   # alpheric — code models (deepseek-coder, llama3.2)
-        "http://10.0.0.10:11434",  # alpheric.com — QA/reasoning models (codellama, deepseek-r1, mistral)
+        "http://10.0.0.9:11434",   # Code models (deepseek-coder, llama3.2)
+        "http://10.0.0.10:11434",  # QA/reasoning models (codellama, deepseek-r1, mistral)
     ]
 
     # OpenClaw gateway
-    openclaw_url: str = ""  # e.g., "http://10.0.0.3:18789"
-    openclaw_token: str = ""  # gateway auth token
+    openclaw_url: str = ""
+    openclaw_token: str = ""
 
-    # Alpheric-1 — unified model name exposed by A1 Trainer
-    alpheric_model_name: str = "alpheric-1"
+    # Atlas model family
+    atlas_models: list[str] = [
+        "atlas-plan", "atlas-code", "atlas-secure",
+        "atlas-infra", "atlas-data", "atlas-books", "atlas-audit",
+    ]
 
     # Proxy auth
-    api_keys: list[str] = []  # allowed API keys for proxy access
+    api_keys: list[str] = []
 
     # Routing
-    exploration_rate: float = 0.1  # epsilon-greedy exploration
+    exploration_rate: float = 0.1
     default_strategy: str = "best_quality"
 
     # Training
@@ -54,25 +57,21 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     # --- Open-source integrations ---
+    use_litellm: bool = True
+    use_unsloth: bool = True
 
-    # LiteLLM (provider engine)
-    use_litellm: bool = True  # False reverts to native provider implementations
-
-    # Unsloth (fast training)
-    use_unsloth: bool = True  # False reverts to HuggingFace manual QLoRA
-
-    # GPTCache (semantic caching)
+    # GPTCache
     cache_enabled: bool = False
     cache_similarity_threshold: float = 0.8
     cache_ttl_seconds: int = 3600
-    cache_embedding: str = "local"  # "local" (onnx) or "openai"
+    cache_embedding: str = "local"
     cache_db_path: str = "./cache/gptcache.db"
 
     # OpenTelemetry
-    otlp_endpoint: str = ""  # e.g., "http://localhost:4317" for Jaeger/Tempo
+    otlp_endpoint: str = ""
 
-    # Argilla (human feedback)
-    argilla_api_url: str = ""  # e.g., "http://localhost:6900"
+    # Argilla
+    argilla_api_url: str = ""
     argilla_api_key: str = ""
     argilla_workspace: str = "default"
 
@@ -83,20 +82,20 @@ class Settings(BaseSettings):
     harness_batch_size: int = 4
 
     # Multi-account key pool
-    key_pool_strategy: str = "round_robin"  # round_robin, least_used, priority, budget_aware
-    encryption_key: str = ""  # Fernet key for encrypting stored API keys
+    key_pool_strategy: str = "round_robin"
+    encryption_key: str = ""
 
-    # Distillation / Auto-training pipeline
+    # Distillation / Auto-training
     distillation_enabled: bool = True
-    distillation_claude_model: str = "claude-opus-4-20250514"  # teacher model
-    distillation_min_samples: int = 100  # per task type before training triggers
-    distillation_quality_threshold: float = 0.7  # min similarity to use as training data
-    distillation_handoff_increment: float = 0.1  # +10% local handoff per successful training
-    distillation_max_handoff_pct: float = 0.9  # never exceed 90% local (keep 10% monitoring)
+    distillation_claude_model: str = "claude-opus-4-20250514"
+    distillation_min_samples: int = 100
+    distillation_quality_threshold: float = 0.7
+    distillation_handoff_increment: float = 0.1
+    distillation_max_handoff_pct: float = 0.9
 
     # Multi-model management
-    warm_up_models: list[str] = []  # Ollama models to preload on startup
-    reference_external_model: str = "gpt-4o-mini"  # for savings calculation
+    warm_up_models: list[str] = []
+    reference_external_model: str = "gpt-4o-mini"
 
 
 settings = Settings()

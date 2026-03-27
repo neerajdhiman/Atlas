@@ -81,7 +81,7 @@ export default function Overview() {
               <RocketOutlined style={{ fontSize: 28, color: '#3b82f6' }} />
               <div>
                 <Typography.Title level={4} style={{ margin: 0 }}>
-                  Alpheric-1 <Tag color="blue">Live</Tag>
+                  Alpheric.AI — Atlas <Tag color="blue">Live</Tag>
                 </Typography.Title>
                 <Text type="secondary">
                   Smart-routing to {data?.providers?.filter(p => p.healthy).length ?? 0} providers, {

@@ -1,6 +1,6 @@
 """Auto-trainer: Claude-to-Local distillation pipeline.
 
-Routes alpheric-1 requests through Claude Opus (teacher), returns response to user,
+Routes Atlas model requests through Claude Opus (teacher), returns response to user,
 then asynchronously compares with local model (student). Accumulates training data
 and triggers fine-tuning when enough quality samples exist per task type.
 Gradually shifts traffic to local models as they improve.
@@ -77,7 +77,7 @@ async def handle_dual_execution(
     """Send request to Claude Opus, return response, fire background local comparison.
 
     This is the main entry point called from the proxy router when
-    alpheric-1 is requested and distillation is enabled.
+    an Atlas model is requested and distillation is enabled.
     """
     start_time = time.time()
 

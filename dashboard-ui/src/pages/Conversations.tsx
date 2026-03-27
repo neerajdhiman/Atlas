@@ -226,7 +226,7 @@ export default function Conversations() {
                   <Typography.Text type="secondary" style={{ fontSize: 14 }}>No conversations yet</Typography.Text>
                 </div>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  Send requests to <code>alpheric-1</code> via the API or Playground to start recording conversations
+                  Send requests to any <code>atlas-*</code> model via the API or Playground to start recording conversations
                 </Typography.Text>
               </div>
             ),

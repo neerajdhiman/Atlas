@@ -47,9 +47,9 @@ export default function Sidebar() {
       <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <DashboardOutlined style={{ fontSize: 22, color: '#3b82f6' }} />
-          <span style={{ fontSize: 18, fontWeight: 700, color: '#fff' }}>A1 Trainer</span>
+          <span style={{ fontSize: 18, fontWeight: 700, color: '#fff' }}>Alpheric.AI</span>
         </div>
-        <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>OneDesk AI Middleware</div>
+        <div style={{ fontSize: 11, color: '#6b7280', marginTop: 4 }}>Atlas Model Family</div>
       </div>
 
       <Menu

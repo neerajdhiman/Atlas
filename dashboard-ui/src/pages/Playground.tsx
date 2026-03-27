@@ -25,7 +25,7 @@ interface PlaygroundResult {
 
 export default function Playground() {
   const [models, setModels] = useState<any[]>([]);
-  const [selectedModel, setSelectedModel] = useState('alpheric-1');
+  const [selectedModel, setSelectedModel] = useState('atlas-plan');
   const [compareModel, setCompareModel] = useState<string | null>(null);
   const [prompt, setPrompt] = useState('');
   const [systemPrompt, setSystemPrompt] = useState('');
@@ -79,8 +79,8 @@ export default function Playground() {
   const modelOptions = models.map((m: any) => ({
     label: (
       <span>
-        {m.id === 'alpheric-1' ? '🚀 ' : ''}{m.id}
-        <Tag color={m.owned_by === 'ollama' ? 'green' : m.owned_by === 'alpheric' ? 'gold' : 'blue'} style={{ marginLeft: 8, fontSize: 10 }}>
+        {m.id.startsWith('atlas-') ? '🔮 ' : ''}{m.id}
+        <Tag color={m.owned_by === 'ollama' ? 'green' : m.owned_by === 'alpheric.ai' ? 'gold' : 'blue'} style={{ marginLeft: 8, fontSize: 10 }}>
           {m.owned_by}
         </Tag>
       </span>

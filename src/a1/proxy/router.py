@@ -89,19 +89,27 @@ async def chat_completions(
     # Determine strategy
     strategy = request.strategy or "best_quality"
 
-    # Alpheric-1: ALWAYS use Claude distillation when enabled
-    if request.model == "alpheric-1":
+    # Atlas model family — route through Claude distillation or local fallback
+    ATLAS_TASK_MAP = {
+        "atlas-plan": "chat",
+        "atlas-code": "code",
+        "atlas-secure": "analysis",
+        "atlas-infra": "code",
+        "atlas-data": "analysis",
+        "atlas-books": "creative",
+        "atlas-audit": "structured_extraction",
+    }
+    if request.model in ATLAS_TASK_MAP:
+        forced_task = ATLAS_TASK_MAP[request.model]
         if settings.distillation_enabled:
             from a1.training.auto_trainer import handle_dual_execution
-            task_type_pre, confidence_pre = classify_task(request)
             dual_result = await handle_dual_execution(
-                request, response, task_type_pre, confidence_pre,
+                request, response, forced_task, 0.9,
             )
             if dual_result is not None:
                 return dual_result
-            # If dual_result is None, Claude was unavailable — fall through to auto
 
-        # Fallback: route to best local model
+        # Fallback: route to best local model for this task type
         request.model = "auto"
         strategy = "best_quality"
 
@@ -350,21 +358,27 @@ async def responses_api(
     if not messages:
         messages.append(MessageInput(role="user", content="Hello"))
 
-    # Route alpheric-1: ALWAYS use Claude when distillation is enabled
-    if model == "alpheric-1":
+    # Atlas model family routing
+    ATLAS_TASK_MAP_RESP = {
+        "atlas-plan": "chat", "atlas-code": "code", "atlas-secure": "analysis",
+        "atlas-infra": "code", "atlas-data": "analysis", "atlas-books": "creative",
+        "atlas-audit": "structured_extraction",
+    }
+    if model in ATLAS_TASK_MAP_RESP:
+        atlas_task = ATLAS_TASK_MAP_RESP[model]
+        atlas_model_name = model  # preserve for response
         if settings.distillation_enabled:
             from a1.proxy.request_models import MessageInput as _MI
             from a1.training.auto_trainer import handle_dual_execution
             temp_msgs = [_MI(role=m.role, content=m.content) for m in messages]
             temp_req = ChatCompletionRequest(model="auto", messages=temp_msgs, max_tokens=max_tokens)
-            task_type_pre, _ = classify_task(temp_req)
-            dual_result = await handle_dual_execution(temp_req, response, task_type_pre, 0.8)
+            dual_result = await handle_dual_execution(temp_req, response, atlas_task, 0.9)
             if dual_result is not None:
                 assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
                 resp_id = f"resp_{uuid.uuid4().hex[:12]}"
                 return {
                     "id": resp_id, "object": "response", "created_at": int(time.time()),
-                    "model": dual_result.model,
+                    "model": atlas_model_name,
                     "output": [{"type": "message", "id": f"msg_{uuid.uuid4().hex[:8]}",
                                 "role": "assistant", "content": [{"type": "output_text", "text": assistant_text}],
                                 "status": "completed"}],
@@ -373,7 +387,8 @@ async def responses_api(
                               "output_tokens": dual_result.usage.completion_tokens,
                               "total_tokens": dual_result.usage.total_tokens},
                     "metadata": {"provider": "claude-cli", "is_local": False,
-                                 "task_type": task_type_pre, "distillation": True},
+                                 "task_type": atlas_task, "distillation": True,
+                                 "atlas_model": atlas_model_name},
                 }
         model = "auto"
 
@@ -523,10 +538,16 @@ async def list_models(api_key: str = Depends(verify_api_key)):
             for m in models
         ]
         + [
-            {"id": "alpheric-1", "object": "model", "owned_by": "alpheric", "context_window": 128000},
-            {"id": "auto", "object": "model", "owned_by": "a1-trainer", "context_window": 200000},
-            {"id": "auto:fast", "object": "model", "owned_by": "a1-trainer", "context_window": 200000},
-            {"id": "auto:cheap", "object": "model", "owned_by": "a1-trainer", "context_window": 200000},
-            {"id": "local", "object": "model", "owned_by": "a1-trainer", "context_window": 4096},
+            {"id": "atlas-plan", "object": "model", "owned_by": "alpheric.ai", "context_window": 128000, "description": "Planning, discussion, brainstorming"},
+            {"id": "atlas-code", "object": "model", "owned_by": "alpheric.ai", "context_window": 128000, "description": "Code generation, debugging, review"},
+            {"id": "atlas-secure", "object": "model", "owned_by": "alpheric.ai", "context_window": 128000, "description": "Security analysis, reasoning, auditing"},
+            {"id": "atlas-infra", "object": "model", "owned_by": "alpheric.ai", "context_window": 128000, "description": "Infrastructure, DevOps, deployment"},
+            {"id": "atlas-data", "object": "model", "owned_by": "alpheric.ai", "context_window": 128000, "description": "Data analysis, statistics, ETL"},
+            {"id": "atlas-books", "object": "model", "owned_by": "alpheric.ai", "context_window": 128000, "description": "Documentation, writing, research"},
+            {"id": "atlas-audit", "object": "model", "owned_by": "alpheric.ai", "context_window": 128000, "description": "Compliance auditing, log analysis, structured extraction"},
+            {"id": "auto", "object": "model", "owned_by": "alpheric.ai", "context_window": 200000},
+            {"id": "auto:fast", "object": "model", "owned_by": "alpheric.ai", "context_window": 200000},
+            {"id": "auto:cheap", "object": "model", "owned_by": "alpheric.ai", "context_window": 200000},
+            {"id": "local", "object": "model", "owned_by": "alpheric.ai", "context_window": 4096},
         ],
     }
