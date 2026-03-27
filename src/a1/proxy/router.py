@@ -326,9 +326,10 @@ async def responses_api(
     start_time = time.time()
 
     # Parse the Responses API format
-    model = request.get("model", "alpheric-1")
+    model = request.get("model", "atlas-plan")
     input_data = request.get("input", "")
     instructions = request.get("instructions", "")
+    tools = request.get("tools", [])
     temperature = request.get("temperature")
     max_tokens = request.get("max_output_tokens") or request.get("max_tokens", 1000)
     stream = request.get("stream", False)
@@ -336,8 +337,24 @@ async def responses_api(
     # Build messages from input
     from a1.proxy.request_models import MessageInput
     messages = []
+
+    # Combine instructions + tools into system prompt
+    system_parts = []
     if instructions:
-        messages.append(MessageInput(role="system", content=instructions))
+        system_parts.append(instructions)
+    if tools:
+        import json as _json
+        tool_descriptions = []
+        for tool in tools:
+            name = tool.get("name", tool.get("function", {}).get("name", "unknown"))
+            desc = tool.get("description", tool.get("function", {}).get("description", ""))
+            params = tool.get("parameters", tool.get("function", {}).get("parameters", {}))
+            tool_descriptions.append(f"- {name}: {desc}")
+        if tool_descriptions:
+            system_parts.append("\n\nAvailable tools:\n" + "\n".join(tool_descriptions))
+
+    if system_parts:
+        messages.append(MessageInput(role="system", content="\n".join(system_parts)))
 
     if isinstance(input_data, str):
         messages.append(MessageInput(role="user", content=input_data))
@@ -604,14 +621,29 @@ async def atlas_endpoint(
     model = request.get("model", "atlas")
     input_data = request.get("input", "")
     instructions = request.get("instructions", "")
+    tools = request.get("tools", [])
     temperature = request.get("temperature")
     max_tokens = request.get("max_output_tokens") or request.get("max_tokens", 1000)
 
     # Build messages
     from a1.proxy.request_models import MessageInput
     messages = []
+
+    # Combine instructions + tools into system prompt
+    system_parts = []
     if instructions:
-        messages.append(MessageInput(role="system", content=instructions))
+        system_parts.append(instructions)
+    if tools:
+        tool_descriptions = []
+        for tool in tools:
+            name = tool.get("name", tool.get("function", {}).get("name", "unknown"))
+            desc = tool.get("description", tool.get("function", {}).get("description", ""))
+            tool_descriptions.append(f"- {name}: {desc}")
+        if tool_descriptions:
+            system_parts.append("\n\nAvailable tools:\n" + "\n".join(tool_descriptions))
+
+    if system_parts:
+        messages.append(MessageInput(role="system", content="\n".join(system_parts)))
 
     if isinstance(input_data, str):
         messages.append(MessageInput(role="user", content=input_data))
