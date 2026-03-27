@@ -21,18 +21,27 @@ from config.settings import settings
 
 # Use JSONB for PostgreSQL, JSON for SQLite
 if "sqlite" in settings.database_url:
-    from sqlalchemy import String as UUID_TYPE_BASE
+    from sqlalchemy import String as UUID_TYPE_BASE, TypeDecorator
     import uuid as _uuid_mod
 
-    # SQLite: use String(36) for UUID columns, JSON for JSONB
     JSONB = GenericJSON
 
-    class _UUIDType(String):
-        """UUID stored as string in SQLite."""
-        def __init__(self):
-            super().__init__(36)
+    class SQLiteUUID(TypeDecorator):
+        """UUID stored as string in SQLite, auto-converts UUID objects."""
+        impl = String(36)
+        cache_ok = True
 
-    UUID = lambda as_uuid=True: String(36)
+        def process_bind_param(self, value, dialect):
+            if value is not None:
+                return str(value)
+            return value
+
+        def process_result_value(self, value, dialect):
+            if value is not None:
+                return _uuid_mod.UUID(value) if not isinstance(value, _uuid_mod.UUID) else value
+            return value
+
+    UUID = lambda as_uuid=True: SQLiteUUID()
 else:
     from sqlalchemy.dialects.postgresql import JSONB, UUID
 

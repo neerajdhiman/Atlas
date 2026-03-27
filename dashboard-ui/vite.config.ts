@@ -14,24 +14,20 @@ export default defineConfig({
     host: '0.0.0.0',
     proxy: {
       '/admin': {
-        target: 'https://localhost:8000',
+        target: 'http://localhost:8001',
         changeOrigin: true,
-        secure: false,
       },
       '/admin/ws': {
-        target: 'wss://localhost:8000',
+        target: 'ws://localhost:8001',
         ws: true,
-        secure: false,
       },
       '/v1': {
-        target: 'https://localhost:8000',
+        target: 'http://localhost:8001',
         changeOrigin: true,
-        secure: false,
       },
       '/health': {
-        target: 'https://localhost:8000',
+        target: 'http://localhost:8001',
         changeOrigin: true,
-        secure: false,
       },
     },
   },
