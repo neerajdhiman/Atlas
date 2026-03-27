@@ -613,6 +613,21 @@ async def atlas_endpoint(
     max_tokens = request.get("max_output_tokens") or request.get("max_tokens", 1000)
     stream = request.get("stream", False)
 
+    # --- Session Memory ---
+    session_id = request.get("session_id")
+    previous_response_id = request.get("previous_response_id")
+
+    session = None
+    session_history = []
+    if settings.session_enabled:
+        from a1.session.manager import session_manager
+        session = session_manager.get_or_create(
+            session_id=session_id,
+            previous_response_id=previous_response_id,
+            user_id=request.get("user"),
+        )
+        session_history = session.get_history(limit=settings.session_max_messages)
+
     # Build messages
     from a1.proxy.request_models import MessageInput
     messages = []
@@ -633,6 +648,11 @@ async def atlas_endpoint(
     if system_parts:
         messages.append(MessageInput(role="system", content="\n".join(system_parts)))
 
+    # Inject session history before current message
+    for hist_msg in session_history:
+        messages.append(MessageInput(role=hist_msg["role"], content=hist_msg["content"]))
+
+    # Current input
     if isinstance(input_data, str):
         messages.append(MessageInput(role="user", content=input_data))
     elif isinstance(input_data, list):
@@ -648,6 +668,15 @@ async def atlas_endpoint(
 
     if not messages:
         messages.append(MessageInput(role="user", content="Hello"))
+
+    # --- PII Masking (for external providers only) ---
+    mask_map = {}
+    if settings.pii_masking_enabled:
+        from a1.security.pii_masker import pii_masker
+        messages_dicts = [{"role": m.role, "content": m.content or ""} for m in messages]
+        masked_dicts, mask_map = pii_masker.mask_messages(messages_dicts)
+        # Rebuild MessageInput with masked content
+        messages = [MessageInput(role=d["role"], content=d["content"]) for d in masked_dicts]
 
     # Resolve Atlas model
     if model == "atlas" or model not in ATLAS_TASK_ROUTING:
@@ -668,13 +697,33 @@ async def atlas_endpoint(
         dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9)
         if dual_result is not None:
             assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
+
+            # Unmask PII in response
+            if mask_map:
+                from a1.security.pii_masker import pii_masker
+                assistant_text = pii_masker.unmask(assistant_text, mask_map)
+
+            # Store in session
+            if session:
+                user_input = input_data if isinstance(input_data, str) else str(input_data)
+                session.add_message("user", user_input)
+                session.add_message("assistant", assistant_text)
+
             latency_ms = int((time.time() - start_time) * 1000)
             resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+
+            # Link response to session for chaining
+            if session:
+                from a1.session.manager import session_manager
+                session_manager.link_response(resp_id, session.id)
+
             usage = {"input_tokens": dual_result.usage.prompt_tokens,
                      "output_tokens": dual_result.usage.completion_tokens,
                      "total_tokens": dual_result.usage.total_tokens}
             meta = {"provider": "claude-cli", "is_local": False, "task_type": task_type,
-                    "atlas_model": atlas_model, "distillation": True, "latency_ms": latency_ms}
+                    "atlas_model": atlas_model, "distillation": True, "latency_ms": latency_ms,
+                    "session_id": session.id if session else None,
+                    "pii_masked": len(mask_map) > 0}
             return await _return_response_or_stream(stream, resp_id, atlas_model, assistant_text, usage, meta)
 
     # Fallback: route to local model

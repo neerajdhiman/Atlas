@@ -93,6 +93,16 @@ class Settings(BaseSettings):
     distillation_handoff_increment: float = 0.1
     distillation_max_handoff_pct: float = 0.9
 
+    # Session memory
+    session_enabled: bool = True
+    session_ttl_seconds: int = 3600  # 1 hour
+    session_max_messages: int = 20  # max history to include per request
+
+    # PII masking (enterprise)
+    pii_masking_enabled: bool = True
+    pii_mask_for_external_only: bool = True  # only mask for Claude, not Ollama
+    pii_patterns: list[str] = ["email", "phone", "ssn", "credit_card", "api_key", "ip_address", "aws_key", "password"]
+
     # Multi-model management
     warm_up_models: list[str] = []
     reference_external_model: str = "gpt-4o-mini"

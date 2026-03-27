@@ -696,6 +696,44 @@ async def set_handoff_percentage(task_type: str, pct: float = Query(..., ge=0, l
     return {"task_type": task_type, "handoff_pct": pct}
 
 
+# --- Sessions ---
+@router.get("/sessions")
+async def list_sessions():
+    """List all active sessions."""
+    from a1.session.manager import session_manager
+    return {"data": session_manager.list_active()}
+
+
+@router.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    """Get session detail with message history."""
+    from a1.session.manager import session_manager
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found or expired")
+    return {
+        "id": session.id,
+        "user_id": session.user_id,
+        "message_count": len(session.messages),
+        "messages": [{"role": m.role, "content": m.content[:200], "timestamp": m.timestamp} for m in session.messages],
+        "created_at": session.created_at,
+        "last_activity": session.last_activity,
+    }
+
+
+# --- PII Stats ---
+@router.get("/pii/stats")
+async def pii_stats():
+    """PII masking statistics."""
+    from a1.security.pii_masker import get_mask_stats
+    return {
+        "enabled": settings.pii_masking_enabled,
+        "external_only": settings.pii_mask_for_external_only,
+        "patterns": settings.pii_patterns,
+        **get_mask_stats(),
+    }
+
+
 @router.get("/servers")
 async def server_status():
     """Get status of all infrastructure servers."""
