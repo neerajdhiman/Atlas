@@ -32,6 +32,27 @@ REFERENCE_COST_PER_1K_INPUT = 0.00015
 REFERENCE_COST_PER_1K_OUTPUT = 0.0006
 
 
+async def _return_response_or_stream(
+    stream: bool, resp_id: str, model: str, text: str,
+    usage: dict, metadata: dict | None = None,
+):
+    """Return either JSON response or SSE stream based on stream flag."""
+    if stream:
+        from a1.proxy.stream import sse_responses_stream
+        return await sse_responses_stream(resp_id, model, text, usage, metadata)
+    return {
+        "id": resp_id, "object": "response", "created_at": int(time.time()),
+        "model": model,
+        "output": [{"type": "message", "id": f"msg_{uuid.uuid4().hex[:8]}",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}],
+                    "status": "completed"}],
+        "status": "completed",
+        "usage": usage,
+        **({"metadata": metadata} if metadata else {}),
+    }
+
+
 def _calc_equivalent_cost(prompt_tokens: int, completion_tokens: int) -> float:
     """What this request would have cost using the reference external model."""
     return (prompt_tokens / 1000 * REFERENCE_COST_PER_1K_INPUT +
@@ -393,20 +414,13 @@ async def responses_api(
             if dual_result is not None:
                 assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
                 resp_id = f"resp_{uuid.uuid4().hex[:12]}"
-                return {
-                    "id": resp_id, "object": "response", "created_at": int(time.time()),
-                    "model": atlas_model_name,
-                    "output": [{"type": "message", "id": f"msg_{uuid.uuid4().hex[:8]}",
-                                "role": "assistant", "content": [{"type": "output_text", "text": assistant_text}],
-                                "status": "completed"}],
-                    "status": "completed",
-                    "usage": {"input_tokens": dual_result.usage.prompt_tokens,
-                              "output_tokens": dual_result.usage.completion_tokens,
-                              "total_tokens": dual_result.usage.total_tokens},
-                    "metadata": {"provider": "claude-cli", "is_local": False,
-                                 "task_type": atlas_task, "distillation": True,
-                                 "atlas_model": atlas_model_name},
-                }
+                usage = {"input_tokens": dual_result.usage.prompt_tokens,
+                         "output_tokens": dual_result.usage.completion_tokens,
+                         "total_tokens": dual_result.usage.total_tokens}
+                meta = {"provider": "claude-cli", "is_local": False,
+                        "task_type": atlas_task, "distillation": True,
+                        "atlas_model": atlas_model_name}
+                return await _return_response_or_stream(stream, resp_id, atlas_model_name, assistant_text, usage, meta)
         model = "auto"
 
     # Build ChatCompletionRequest
@@ -503,41 +517,14 @@ async def responses_api(
     response.headers["X-A1-Model"] = model_name
     response.headers["X-A1-Is-Local"] = str(is_local).lower()
 
-    # Return Responses API format
+    # Return Responses API format (JSON or SSE stream)
     resp_id = f"resp_{uuid.uuid4().hex[:12]}"
-    return {
-        "id": resp_id,
-        "object": "response",
-        "created_at": int(time.time()),
-        "model": model_name,
-        "output": [
-            {
-                "type": "message",
-                "id": f"msg_{uuid.uuid4().hex[:8]}",
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": assistant_text,
-                    }
-                ],
-                "status": "completed",
-            }
-        ],
-        "status": "completed",
-        "usage": {
-            "input_tokens": result.usage.prompt_tokens,
-            "output_tokens": result.usage.completion_tokens,
-            "total_tokens": result.usage.total_tokens,
-        },
-        "metadata": {
-            "provider": provider_name,
-            "is_local": is_local,
-            "task_type": task_type,
-            "latency_ms": latency_ms,
-            "cost_usd": cost,
-        },
-    }
+    usage = {"input_tokens": result.usage.prompt_tokens,
+             "output_tokens": result.usage.completion_tokens,
+             "total_tokens": result.usage.total_tokens}
+    meta = {"provider": provider_name, "is_local": is_local,
+            "task_type": task_type, "latency_ms": latency_ms, "cost_usd": cost}
+    return await _return_response_or_stream(stream, resp_id, model_name, assistant_text, usage, meta)
 
 
 @router.get("/v1/models")
@@ -624,6 +611,7 @@ async def atlas_endpoint(
     tools = request.get("tools", [])
     temperature = request.get("temperature")
     max_tokens = request.get("max_output_tokens") or request.get("max_tokens", 1000)
+    stream = request.get("stream", False)
 
     # Build messages
     from a1.proxy.request_models import MessageInput
@@ -682,35 +670,12 @@ async def atlas_endpoint(
             assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
             latency_ms = int((time.time() - start_time) * 1000)
             resp_id = f"resp_{uuid.uuid4().hex[:12]}"
-            return {
-                "id": resp_id,
-                "object": "response",
-                "created_at": int(time.time()),
-                "model": atlas_model,
-                "output": [
-                    {
-                        "type": "message",
-                        "id": f"msg_{uuid.uuid4().hex[:8]}",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": assistant_text}],
-                        "status": "completed",
-                    }
-                ],
-                "status": "completed",
-                "usage": {
-                    "input_tokens": dual_result.usage.prompt_tokens,
-                    "output_tokens": dual_result.usage.completion_tokens,
-                    "total_tokens": dual_result.usage.total_tokens,
-                },
-                "metadata": {
-                    "provider": "claude-cli",
-                    "is_local": False,
-                    "task_type": task_type,
-                    "atlas_model": atlas_model,
-                    "distillation": True,
-                    "latency_ms": latency_ms,
-                },
-            }
+            usage = {"input_tokens": dual_result.usage.prompt_tokens,
+                     "output_tokens": dual_result.usage.completion_tokens,
+                     "total_tokens": dual_result.usage.total_tokens}
+            meta = {"provider": "claude-cli", "is_local": False, "task_type": task_type,
+                    "atlas_model": atlas_model, "distillation": True, "latency_ms": latency_ms}
+            return await _return_response_or_stream(stream, resp_id, atlas_model, assistant_text, usage, meta)
 
     # Fallback: route to local model
     temp_req = ChatCompletionRequest(model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature)
@@ -749,31 +714,13 @@ async def atlas_endpoint(
     response.headers["X-Atlas-Model"] = atlas_model
     response.headers["X-Atlas-Provider"] = provider_name
 
-    return {
-        "id": f"resp_{uuid.uuid4().hex[:12]}",
-        "object": "response",
-        "created_at": int(time.time()),
-        "model": atlas_model,
-        "output": [{"type": "message", "id": f"msg_{uuid.uuid4().hex[:8]}",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": assistant_text}],
-                    "status": "completed"}],
-        "status": "completed",
-        "usage": {
-            "input_tokens": result.usage.prompt_tokens,
-            "output_tokens": result.usage.completion_tokens,
-            "total_tokens": result.usage.total_tokens,
-        },
-        "metadata": {
-            "provider": provider_name,
-            "actual_model": model_name,
-            "is_local": is_local,
-            "task_type": task_type,
-            "atlas_model": atlas_model,
-            "cost_usd": cost,
-            "latency_ms": latency_ms,
-        },
-    }
+    resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+    usage = {"input_tokens": result.usage.prompt_tokens,
+             "output_tokens": result.usage.completion_tokens,
+             "total_tokens": result.usage.total_tokens}
+    meta = {"provider": provider_name, "actual_model": model_name, "is_local": is_local,
+            "task_type": task_type, "atlas_model": atlas_model, "cost_usd": cost, "latency_ms": latency_ms}
+    return await _return_response_or_stream(stream, resp_id, atlas_model, assistant_text, usage, meta)
 
 
 @router.get("/atlas/models")
