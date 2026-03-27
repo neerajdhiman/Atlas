@@ -291,6 +291,156 @@ async def chat_completions(
     return result
 
 
+@router.post("/v1/responses")
+async def responses_api(
+    request: dict,
+    response: Response,
+    api_key: str = Depends(verify_api_key),
+    db: AsyncSession = Depends(get_db),
+):
+    """OpenAI Responses API format — used by OpenClaw and other clients.
+
+    Accepts: { model, input (str or messages), instructions, temperature, max_output_tokens, stream }
+    Returns: { id, object: "response", output: [{type: "message", content: [{type: "output_text", text}]}] }
+    """
+    start_time = time.time()
+
+    # Parse the Responses API format
+    model = request.get("model", "alpheric-1")
+    input_data = request.get("input", "")
+    instructions = request.get("instructions", "")
+    temperature = request.get("temperature")
+    max_tokens = request.get("max_output_tokens") or request.get("max_tokens", 1000)
+    stream = request.get("stream", False)
+
+    # Build messages from input
+    from a1.proxy.request_models import MessageInput
+    messages = []
+    if instructions:
+        messages.append(MessageInput(role="system", content=instructions))
+
+    if isinstance(input_data, str):
+        messages.append(MessageInput(role="user", content=input_data))
+    elif isinstance(input_data, list):
+        # Array of messages in OpenAI format
+        for msg in input_data:
+            if isinstance(msg, dict):
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    # Content array format: [{"type": "input_text", "text": "..."}]
+                    text_parts = [p.get("text", "") for p in content if isinstance(p, dict)]
+                    content = " ".join(text_parts)
+                messages.append(MessageInput(role=role, content=content))
+            elif isinstance(msg, str):
+                messages.append(MessageInput(role="user", content=msg))
+
+    if not messages:
+        messages.append(MessageInput(role="user", content="Hello"))
+
+    # Route alpheric-1 to auto
+    if model == "alpheric-1":
+        model = "auto"
+
+    # Build ChatCompletionRequest
+    chat_req = ChatCompletionRequest(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+    # Resolve model
+    is_auto = chat_req.model.startswith("auto") or chat_req.model == "local"
+    if is_auto:
+        task_type, confidence = classify_task(chat_req)
+        strategy = "best_quality"
+        if chat_req.model == "auto:fast":
+            strategy = "lowest_latency"
+        elif chat_req.model == "auto:cheap":
+            strategy = "lowest_cost"
+        model_name, provider_name = await select_model(task_type, strategy)
+        provider = provider_registry.get_provider(provider_name)
+        if not provider:
+            for p in provider_registry.healthy_providers.values():
+                provider = p
+                ms = p.list_models()
+                if ms:
+                    model_name = ms[0].name
+                    provider_name = p.name
+                break
+        chat_req.model = model_name
+    else:
+        task_type, confidence = classify_task(chat_req)
+        provider = provider_registry.get_provider_for_model(chat_req.model)
+        provider_name = provider.name if provider else "unknown"
+        model_name = chat_req.model
+
+    if not provider:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"No provider for model: {chat_req.model}")
+
+    is_local = provider_name in ("ollama", "claude-cli")
+
+    log.info(f"[responses] Routing to {provider_name}/{model_name} (task={task_type})")
+
+    # Execute
+    result = await provider.complete(chat_req)
+    latency_ms = int((time.time() - start_time) * 1000)
+
+    assistant_text = result.choices[0].message.content if result.choices else ""
+
+    # Record metrics
+    cost = provider.estimate_cost(
+        result.usage.prompt_tokens, result.usage.completion_tokens, model_name
+    ) if not is_local else 0.0
+    metrics.record_request(
+        provider_name, model_name, task_type, latency_ms, cost,
+        result.usage.prompt_tokens, result.usage.completion_tokens, is_local=is_local,
+    )
+
+    # Response headers
+    response.headers["X-A1-Provider"] = provider_name
+    response.headers["X-A1-Model"] = model_name
+    response.headers["X-A1-Is-Local"] = str(is_local).lower()
+
+    # Return Responses API format
+    resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+    return {
+        "id": resp_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "model": model_name,
+        "output": [
+            {
+                "type": "message",
+                "id": f"msg_{uuid.uuid4().hex[:8]}",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": assistant_text,
+                    }
+                ],
+                "status": "completed",
+            }
+        ],
+        "status": "completed",
+        "usage": {
+            "input_tokens": result.usage.prompt_tokens,
+            "output_tokens": result.usage.completion_tokens,
+            "total_tokens": result.usage.total_tokens,
+        },
+        "metadata": {
+            "provider": provider_name,
+            "is_local": is_local,
+            "task_type": task_type,
+            "latency_ms": latency_ms,
+            "cost_usd": cost,
+        },
+    }
+
+
 @router.get("/v1/models")
 async def list_models(api_key: str = Depends(verify_api_key)):
     models = provider_registry.list_all_models()
