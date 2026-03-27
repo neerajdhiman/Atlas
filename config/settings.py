@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    model_config = {"env_prefix": "A1_"}
+    model_config = {"env_prefix": "A1_", "env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # App
     app_name: str = "A1 Trainer"

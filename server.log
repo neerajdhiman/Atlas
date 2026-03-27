@@ -1,0 +1,12 @@
+INFO:     Started server process [25276]
+INFO:     Waiting for application startup.
+PyTorch was not found. Models won't be available and only tokenizers, configuration and file/data utilities can be used.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:54761 - "WebSocket /admin/ws/live-feed" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:49674 - "WebSocket /admin/ws/live-feed" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:50284 - "WebSocket /admin/ws/live-feed" [accepted]
+INFO:     connection open

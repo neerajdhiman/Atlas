@@ -1,11 +1,10 @@
 """GPTCache semantic caching layer.
 
-Caches responses for semantically similar queries to reduce API costs.
+Caches responses for semantically similar queries using ONNX embeddings + FAISS.
 Only applies to non-streaming, non-tool-use requests.
-Completely no-op when settings.cache_enabled is False.
+No-op when settings.cache_enabled is False.
 """
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +18,7 @@ _initialized = False
 
 
 def init_cache(settings) -> None:
-    """Initialize GPTCache. No-op if cache_enabled is False."""
+    """Initialize GPTCache with semantic similarity matching."""
     global _cache, _initialized
 
     if not settings.cache_enabled or _initialized:
@@ -28,38 +27,16 @@ def init_cache(settings) -> None:
     try:
         from gptcache import Cache
         from gptcache.adapter.api import init_similar_cache
-        from gptcache.manager import get_data_manager, CacheBase, VectorBase
-        from gptcache.similarity_evaluation import SearchDistanceEvaluation
 
-        # Ensure cache directory exists
         cache_dir = os.path.dirname(settings.cache_db_path)
         if cache_dir:
             Path(cache_dir).mkdir(parents=True, exist_ok=True)
 
         _cache = Cache()
-
-        # Select embedding model
-        if settings.cache_embedding == "local":
-            from gptcache.embedding import Onnx
-            embedding = Onnx()
-        else:
-            from gptcache.embedding import OpenAI as OpenAIEmbedding
-            embedding = OpenAIEmbedding()
-
-        data_manager = get_data_manager(
-            CacheBase("sqlite", sql_url=f"sqlite:///{settings.cache_db_path}"),
-            VectorBase("faiss", dimension=embedding.dimension),
-        )
-
-        init_similar_cache(
-            cache_obj=_cache,
-            data_manager=data_manager,
-            embedding=embedding,
-            evaluation=SearchDistanceEvaluation(),
-        )
+        init_similar_cache(cache_obj=_cache)
 
         _initialized = True
-        log.info(f"GPTCache initialized (embedding={settings.cache_embedding}, db={settings.cache_db_path})")
+        log.info(f"GPTCache initialized (semantic mode, db={settings.cache_db_path})")
 
     except ImportError as e:
         log.warning(f"GPTCache not available: {e}")
@@ -67,23 +44,28 @@ def init_cache(settings) -> None:
         log.error(f"Failed to initialize GPTCache: {e}")
 
 
-def _make_cache_key(messages: list[dict], model: str) -> str:
-    """Create a deterministic cache key from messages + model."""
-    data = json.dumps(messages, sort_keys=True) + "|" + model
-    return hashlib.sha256(data.encode()).hexdigest()
+def _extract_query(messages: list[dict]) -> str:
+    """Extract the user's query text for cache key."""
+    # Use the last user message as the cache key
+    for msg in reversed(messages):
+        if msg.get("role") == "user" and msg.get("content"):
+            return msg["content"]
+    return json.dumps(messages, sort_keys=True)
 
 
 def cache_lookup(messages: list[dict], model: str) -> dict | None:
-    """Look up a cached response. Returns response dict or None on miss."""
+    """Look up a cached response by semantic similarity."""
     if _cache is None:
         return None
 
     try:
-        key = _make_cache_key(messages, model)
-        result = _cache.get(key)
-        if result is not None:
+        query = _extract_query(messages)
+        result = _cache.get(query)
+        if result is not None and result != "":
             log.info(f"Cache HIT for model={model}")
-            return json.loads(result) if isinstance(result, str) else result
+            if isinstance(result, str):
+                return json.loads(result)
+            return result
     except Exception as e:
         log.debug(f"Cache lookup error: {e}")
 
@@ -91,14 +73,14 @@ def cache_lookup(messages: list[dict], model: str) -> dict | None:
 
 
 def cache_store(messages: list[dict], model: str, response_dict: dict) -> None:
-    """Store a response in the cache."""
+    """Store a response in the cache keyed by the user's query."""
     if _cache is None:
         return
 
     try:
-        key = _make_cache_key(messages, model)
+        query = _extract_query(messages)
         value = json.dumps(response_dict, default=str)
-        _cache.set(key, value)
+        _cache.set(query, value)
         log.debug(f"Cache STORE for model={model}")
     except Exception as e:
         log.debug(f"Cache store error: {e}")

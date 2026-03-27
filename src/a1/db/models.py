@@ -13,9 +13,28 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import JSON as GenericJSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
+
+from config.settings import settings
+
+# Use JSONB for PostgreSQL, JSON for SQLite
+if "sqlite" in settings.database_url:
+    from sqlalchemy import String as UUID_TYPE_BASE
+    import uuid as _uuid_mod
+
+    # SQLite: use String(36) for UUID columns, JSON for JSONB
+    JSONB = GenericJSON
+
+    class _UUIDType(String):
+        """UUID stored as string in SQLite."""
+        def __init__(self):
+            super().__init__(36)
+
+    UUID = lambda as_uuid=True: String(36)
+else:
+    from sqlalchemy.dialects.postgresql import JSONB, UUID
 
 from a1.db.engine import Base
 

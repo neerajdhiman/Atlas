@@ -12,6 +12,14 @@ from config.settings import settings
 async def lifespan(app: FastAPI):
     setup_logging(settings.debug)
 
+    # Auto-create tables for SQLite (dev mode)
+    if "sqlite" in settings.database_url:
+        from a1.db.engine import create_tables
+        import a1.db.models  # noqa — ensure all models are registered
+        await create_tables()
+        from a1.common.logging import get_logger
+        get_logger("startup").info("SQLite tables created")
+
     # Initialize OpenTelemetry (no-op if otlp_endpoint is empty)
     from a1.common.telemetry import setup_telemetry
     setup_telemetry(app, settings)
@@ -20,9 +28,12 @@ async def lifespan(app: FastAPI):
     from a1.proxy.cache import init_cache
     init_cache(settings)
 
-    # Load multi-account key pool
-    from a1.providers.key_pool import key_pool
-    await key_pool.load_accounts()
+    # Load multi-account key pool (skip if DB not ready)
+    try:
+        from a1.providers.key_pool import key_pool
+        await key_pool.load_accounts()
+    except Exception:
+        pass  # key pool load fails gracefully without DB
 
     # Register LLM providers
     from a1.providers.registry import provider_registry
