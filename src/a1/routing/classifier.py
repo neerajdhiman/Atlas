@@ -20,8 +20,13 @@ def classify_task(request: ChatCompletionRequest) -> tuple[str, float]:
     if features.has_tools and features.has_code_markers:
         return "code", 0.9
 
-    if features.has_code_markers:
+    # Only classify as code if user message (not system prompt) has code markers
+    # and the message is medium+ length — short messages with code keywords are likely chat
+    if features.has_code_markers and features.token_count_bucket in ("medium", "long", "very_long"):
         return "code", 0.85
+
+    if features.has_code_markers and features.token_count_bucket == "short":
+        return "chat", 0.6  # short messages with code words → likely casual chat
 
     if features.has_math_markers:
         return "math", 0.8

@@ -91,6 +91,21 @@ def create_app() -> FastAPI:
     app.include_router(proxy_router)
     app.include_router(dashboard_router)
 
+    # Request logging middleware — log ALL incoming requests for debugging
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request as StarletteRequest
+    from a1.common.logging import get_logger
+    _req_log = get_logger("requests")
+
+    class RequestLogMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: StarletteRequest, call_next):
+            _req_log.info(f">>> {request.method} {request.url.path} from {request.client.host if request.client else '?'}")
+            response = await call_next(request)
+            _req_log.info(f"<<< {request.method} {request.url.path} -> {response.status_code}")
+            return response
+
+    app.add_middleware(RequestLogMiddleware)
+
     @app.get("/health")
     async def health():
         return {"status": "ok", "service": settings.app_name}

@@ -61,9 +61,10 @@ task_defaults:
       - gpt-4o                            # External
 
   general:
-    model: llama3.2:latest                # Server 1 (local, fast general)
+    model: llama3.2:latest                # Server 1 (local, FAST — 2-3s response)
     fallback:
-      - mistral:7b                        # Server 2 (local)
+      - mistral:7b                        # Server 2 (local, ~5s)
+      - deepseek-coder:6.7b              # Server 1 (local, faster than v2:16b)
       - gpt-4o-mini                       # External (cheap)
 
 # Exploration rate: 10% of requests try non-optimal models for data collection
