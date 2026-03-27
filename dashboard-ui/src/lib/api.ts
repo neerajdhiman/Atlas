@@ -118,6 +118,20 @@ export const runPlayground = (data: {
   temperature?: number; max_tokens?: number;
 }) => api.post('/admin/playground', data, { timeout: 120000 }).then((r) => r.data);
 
+// --- Distillation ---
+export const getDistillationOverview = () => api.get('/admin/distillation/overview').then((r) => r.data);
+export const triggerDistillationTraining = (taskType: string) =>
+  api.post(`/admin/distillation/trigger-training/${taskType}`).then((r) => r.data);
+export const setDistillationHandoff = (taskType: string, pct: number) =>
+  api.post(`/admin/distillation/handoff/${taskType}`, null, { params: { pct } }).then((r) => r.data);
+
+// --- Sessions ---
+export const getSessions = () => api.get('/admin/sessions').then((r) => r.data);
+export const getSessionDetail = (id: string) => api.get(`/admin/sessions/${id}`).then((r) => r.data);
+
+// --- PII ---
+export const getPiiStats = () => api.get('/admin/pii/stats').then((r) => r.data);
+
 // --- OpenClaw ---
 export const getOpenClawStatus = () => api.get('/admin/openclaw/status').then((r) => r.data);
 export const importOpenClawHistory = (limit = 1000) =>
