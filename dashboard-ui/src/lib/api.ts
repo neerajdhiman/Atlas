@@ -45,6 +45,9 @@ export const getConversations = (params: {
 export const getConversation = (id: string) =>
   api.get(`/admin/conversations/${id}`).then((r) => r.data);
 
+export const getConversationStats = () =>
+  api.get('/admin/conversations/stats').then((r) => r.data);
+
 export const addFeedback = (convId: string, messageId: string, value: number) =>
   api.post(`/admin/conversations/${convId}/feedback`, null, {
     params: { message_id: messageId, value },

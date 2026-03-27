@@ -86,6 +86,59 @@ async def list_conversations(
     }
 
 
+@router.get("/conversations/stats")
+async def conversation_stats(db: AsyncSession = Depends(get_db)):
+    """Conversation summary statistics for dashboard KPIs."""
+    from sqlalchemy import func as sqlfunc, select as sqlselect
+    from a1.db.models import Conversation, Message, RoutingDecision
+
+    total = await db.execute(sqlselect(sqlfunc.count(Conversation.id)))
+    total_convs = total.scalar() or 0
+
+    total_msgs = await db.execute(sqlselect(sqlfunc.count(Message.id)))
+    total_messages = total_msgs.scalar() or 0
+
+    # Source breakdown
+    source_q = await db.execute(
+        sqlselect(Conversation.source, sqlfunc.count(Conversation.id))
+        .group_by(Conversation.source)
+    )
+    sources = {row[0]: row[1] for row in source_q.all()}
+
+    # User breakdown
+    user_q = await db.execute(
+        sqlselect(sqlfunc.count(sqlfunc.distinct(Conversation.user_id)))
+        .where(Conversation.user_id != None)
+    )
+    unique_users = user_q.scalar() or 0
+
+    # Avg messages per conversation
+    avg_msgs = total_messages / max(total_convs, 1)
+
+    # Routing decisions count
+    rd_count = await db.execute(sqlselect(sqlfunc.count(RoutingDecision.id)))
+    total_decisions = rd_count.scalar() or 0
+
+    # Recent activity (last 24h)
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    recent_q = await db.execute(
+        sqlselect(sqlfunc.count(Conversation.id))
+        .where(Conversation.created_at >= cutoff)
+    )
+    recent_24h = recent_q.scalar() or 0
+
+    return {
+        "total_conversations": total_convs,
+        "total_messages": total_messages,
+        "unique_users": unique_users,
+        "avg_messages_per_conversation": round(avg_msgs, 1),
+        "total_routing_decisions": total_decisions,
+        "recent_24h": recent_24h,
+        "sources": sources,
+    }
+
+
 @router.get("/conversations/{conv_id}")
 async def get_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
     repo = ConversationRepo(db)
