@@ -9,13 +9,14 @@ from config.settings import settings
 log = get_logger("providers.registry")
 
 
-def _get_claude_cli_key() -> str | None:
+async def _get_claude_cli_key() -> str | None:
     """Try to extract Anthropic API key from Claude CLI credentials.
 
     Reads ~/.claude/.credentials.json for OAuth token.
-    If the token is expired, attempts to refresh by invoking the CLI.
+    If the token is expired, attempts to refresh by invoking the CLI asynchronously.
     """
     import json
+    import time
     from pathlib import Path
 
     cred_path = Path.home() / ".claude" / ".credentials.json"
@@ -32,16 +33,16 @@ def _get_claude_cli_key() -> str | None:
             return None
 
         # Check if expired
-        import time
         now_ms = int(time.time() * 1000)
         if now_ms > expires_at:
             log.warning("Claude CLI OAuth token expired, attempting refresh via CLI...")
             try:
-                import subprocess
-                result = subprocess.run(
-                    ["claude", "-p", "test", "--max-turns", "1"],
-                    capture_output=True, text=True, timeout=30,
+                proc = await asyncio.create_subprocess_exec(
+                    "claude", "-p", "test", "--max-turns", "1",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
                 )
+                await asyncio.wait_for(proc.communicate(), timeout=30)
                 # Re-read credentials after CLI refresh
                 creds = json.loads(cred_path.read_text())
                 oauth = creds.get("claudeAiOauth", {})

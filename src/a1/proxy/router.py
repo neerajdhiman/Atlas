@@ -31,6 +31,11 @@ router = APIRouter(tags=["proxy"])
 REFERENCE_COST_PER_1K_INPUT = 0.00015
 REFERENCE_COST_PER_1K_OUTPUT = 0.0006
 
+# Legacy model name aliases — applied once at request entry per handler
+LEGACY_ALIASES: dict[str, str] = {
+    "alpheric-1": "atlas-plan",
+}
+
 
 async def _return_response_or_stream(
     stream: bool, resp_id: str, model: str, text: str,
@@ -121,22 +126,24 @@ async def chat_completions(
     # Determine strategy
     strategy = request.strategy or "best_quality"
 
-    # Backward compatibility: alpheric-1 → atlas-plan
-    if request.model == "alpheric-1":
-        request.model = "atlas-plan"
+    request.model = LEGACY_ALIASES.get(request.model, request.model)
 
     # Atlas model family — route through Claude distillation or local fallback
     ATLAS_TASK_MAP = {
         "atlas-plan": "chat",
         "atlas-code": "code",
         "atlas-secure": "analysis",
-        "atlas-infra": "code",
+        "atlas-infra": "infra",
         "atlas-data": "analysis",
         "atlas-books": "creative",
         "atlas-audit": "structured_extraction",
     }
+    # Pre-initialize — Atlas models skip the classifier (task is known from the model name)
+    task_type: str | None = None
+    confidence: float = 0.0
     if request.model in ATLAS_TASK_MAP:
         forced_task = ATLAS_TASK_MAP[request.model]
+        task_type, confidence = forced_task, 1.0  # skip classify_task(); task is certain
         if settings.distillation_enabled:
             from a1.training.auto_trainer import handle_dual_execution
             dual_result = await handle_dual_execution(
@@ -152,7 +159,8 @@ async def chat_completions(
     # Route to model
     is_auto = request.model.startswith("auto") or request.model == "local"
     if is_auto:
-        task_type, confidence = classify_task(request)
+        if task_type is None:
+            task_type, confidence = classify_task(request)
         if request.model == "auto:fast":
             strategy = "lowest_latency"
         elif request.model == "auto:cheap":
@@ -169,7 +177,8 @@ async def chat_completions(
                 break
         request.model = model_name
     else:
-        task_type, confidence = classify_task(request)
+        if task_type is None:
+            task_type, confidence = classify_task(request)
         provider = provider_registry.get_provider_for_model(request.model)
         provider_name = provider.name if provider else "unknown"
         model_name = request.model
@@ -411,18 +420,20 @@ async def responses_api(
     if not messages:
         messages.append(MessageInput(role="user", content="Hello"))
 
-    # Backward compatibility: alpheric-1 → atlas-plan
-    if model == "alpheric-1":
-        model = "atlas-plan"
+    model = LEGACY_ALIASES.get(model, model)
 
     # Atlas model family routing
     ATLAS_TASK_MAP_RESP = {
         "atlas-plan": "chat", "atlas-code": "code", "atlas-secure": "analysis",
-        "atlas-infra": "code", "atlas-data": "analysis", "atlas-books": "creative",
+        "atlas-infra": "infra", "atlas-data": "analysis", "atlas-books": "creative",
         "atlas-audit": "structured_extraction",
     }
+    # Pre-initialize — Atlas models skip the classifier (task is known from the model name)
+    task_type: str | None = None
+    confidence: float = 0.0
     if model in ATLAS_TASK_MAP_RESP:
         atlas_task = ATLAS_TASK_MAP_RESP[model]
+        task_type, confidence = atlas_task, 1.0  # skip classify_task(); task is certain
         atlas_model_name = model  # preserve for response
         if settings.distillation_enabled:
             from a1.proxy.request_models import MessageInput as _MI
@@ -453,7 +464,8 @@ async def responses_api(
     # Resolve model
     is_auto = chat_req.model.startswith("auto") or chat_req.model == "local"
     if is_auto:
-        task_type, confidence = classify_task(chat_req)
+        if task_type is None:
+            task_type, confidence = classify_task(chat_req)
         strategy = "best_quality"
         if chat_req.model == "auto:fast":
             strategy = "lowest_latency"
@@ -471,7 +483,8 @@ async def responses_api(
                 break
         chat_req.model = model_name
     else:
-        task_type, confidence = classify_task(chat_req)
+        if task_type is None:
+            task_type, confidence = classify_task(chat_req)
         provider = provider_registry.get_provider_for_model(chat_req.model)
         provider_name = provider.name if provider else "unknown"
         model_name = chat_req.model
@@ -583,7 +596,7 @@ ATLAS_TASK_ROUTING = {
     "atlas-plan": {"tasks": ["chat", "general", "creative"], "description": "Planning, discussion, brainstorming"},
     "atlas-code": {"tasks": ["code", "structured_extraction"], "description": "Code generation, debugging, review"},
     "atlas-secure": {"tasks": ["analysis", "math"], "description": "Security analysis, reasoning, auditing"},
-    "atlas-infra": {"tasks": ["code"], "description": "Infrastructure, DevOps, deployment"},
+    "atlas-infra": {"tasks": ["infra"], "description": "Infrastructure, DevOps, deployment"},
     "atlas-data": {"tasks": ["analysis", "summarization", "math"], "description": "Data analysis, statistics, ETL"},
     "atlas-books": {"tasks": ["creative", "summarization", "translation"], "description": "Documentation, writing, research"},
     "atlas-audit": {"tasks": ["structured_extraction", "analysis"], "description": "Compliance auditing, log analysis"},
@@ -698,9 +711,7 @@ async def atlas_endpoint(
         # Rebuild MessageInput with masked content
         messages = [MessageInput(role=d["role"], content=d["content"]) for d in masked_dicts]
 
-    # Backward compatibility
-    if model == "alpheric-1":
-        model = "atlas-plan"
+    model = LEGACY_ALIASES.get(model, model)
 
     # Resolve Atlas model
     if model == "atlas" or model not in ATLAS_TASK_ROUTING:

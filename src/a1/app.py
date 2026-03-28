@@ -52,6 +52,18 @@ async def lifespan(app: FastAPI):
     from a1.providers.registry import provider_registry
     await provider_registry.initialize()
 
+    # Periodic health refresh every 60 seconds (background)
+    async def _health_refresh_loop():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                await provider_registry.refresh_health()
+            except Exception as e:
+                from a1.common.logging import get_logger
+                get_logger("startup").warning(f"Periodic health refresh failed: {e}")
+
+    _health_task = asyncio.create_task(_health_refresh_loop())
+
     # Warm up local Ollama models (background, non-blocking)
     if settings.warm_up_models:
         from a1.common.logging import get_logger
@@ -76,6 +88,7 @@ async def lifespan(app: FastAPI):
     yield
 
     # Cleanup
+    _health_task.cancel()
     from a1.dependencies import _redis
     if _redis:
         await _redis.aclose()

@@ -10,6 +10,10 @@ from a1.proxy.response_models import ChatCompletionChunk
 async def sse_stream(chunks: AsyncIterator[ChatCompletionChunk]) -> StreamingResponse:
     async def generate():
         async for chunk in chunks:
+            if not chunk.choices and chunk.usage is not None:
+                # Usage-only chunk — emit as plain data to avoid clients indexing choices[0]
+                yield f"data: {json.dumps({'usage': chunk.usage.model_dump()})}\n\n"
+                continue
             data = chunk.model_dump_json(exclude_none=True)
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
@@ -110,6 +114,7 @@ async def sse_responses_stream_live(
                 if chunk.usage:
                     stream_usage = chunk.usage
             full_text = accumulated_text
+            text = accumulated_text
             if stream_usage:
                 usage = {
                     "input_tokens": stream_usage.prompt_tokens,
