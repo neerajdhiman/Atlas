@@ -61,8 +61,9 @@ task_defaults:
       - claude-sonnet-4-20250514          # External
 
   structured_extraction:
-    model: deepseek-coder:6.7b            # Server 1 (local, structured output)
+    model: deepseek-r1:8b                 # Server 2 (local, reasoning — better for audit/compliance)
     fallback:
+      - deepseek-coder:6.7b              # Server 1 (local, structured output)
       - mistral:7b                        # Server 2 (local)
       - gpt-4o                            # External
 

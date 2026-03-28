@@ -1,9 +1,25 @@
 """Task type classifier. Starts rule-based, upgrades to ML when enough data exists."""
 
+import hashlib
 import re
+import time
 
 from a1.proxy.request_models import ChatCompletionRequest
 from a1.routing.features import RequestFeatures, extract_features
+
+# ---------------------------------------------------------------------------
+# 4.2 — Model-based fallback cache (in-process, 60s TTL)
+# ---------------------------------------------------------------------------
+_llm_cache: dict[str, tuple[str, float]] = {}
+_CACHE_TTL = 60.0
+
+_CLASSIFIER_PROMPT = (
+    "Classify the following request into exactly one task type. "
+    "Output only the task type, nothing else.\n\n"
+    "Valid types: code, chat, analysis, creative, summarization, "
+    "translation, math, structured_extraction, general, infra\n\n"
+    "Request: {text}\n\nTask type:"
+)
 
 
 TASK_TYPES = [
@@ -39,6 +55,53 @@ def _feature_confidence(features: RequestFeatures) -> float:
     total = 8
     # Scale: 0 active features → 0.4, all active → 0.95
     return round(0.4 + 0.55 * (active / total), 3)
+
+
+async def _llm_classify(text: str) -> str | None:
+    """Ask llama3.2:latest to classify; returns task_type or None on any error."""
+    cache_key = hashlib.md5(text.encode()).hexdigest()
+    now = time.monotonic()
+    cached = _llm_cache.get(cache_key)
+    if cached and cached[1] > now:
+        return cached[0]
+
+    try:
+        import httpx
+        from config.settings import settings
+
+        prompt = _CLASSIFIER_PROMPT.format(text=text[:600])
+        payload = {
+            "model": "llama3.2:latest",
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0, "num_predict": 10},
+        }
+        base = (settings.ollama_servers[0].rstrip("/")
+                if settings.ollama_servers else "http://10.0.0.9:11434")
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{base}/api/generate", json=payload)
+            resp.raise_for_status()
+            raw = resp.json().get("response", "").strip().lower()
+    except Exception:
+        return None
+
+    for tt in TASK_TYPES:
+        if tt in raw:
+            _llm_cache[cache_key] = (tt, now + _CACHE_TTL)
+            return tt
+    return None
+
+
+async def classify_task_with_fallback(request: ChatCompletionRequest) -> tuple[str, float]:
+    """classify_task + LLM second-pass when rule-based confidence < 0.70."""
+    task_type, confidence = classify_task(request)
+    if confidence >= 0.70:
+        return task_type, confidence
+    full_text = " ".join(m.content or "" for m in request.messages)
+    llm_type = await _llm_classify(full_text)
+    if llm_type:
+        return llm_type, 0.70
+    return task_type, confidence
 
 
 def classify_task(request: ChatCompletionRequest) -> tuple[str, float]:

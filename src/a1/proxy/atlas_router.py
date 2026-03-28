@@ -118,10 +118,10 @@ async def atlas_endpoint(
 
     model = LEGACY_ALIASES.get(model, model)
 
-    # Resolve Atlas model
+    # Resolve Atlas model (4.2: use LLM fallback when confidence < 0.70)
     if model == "atlas" or model not in ATLAS_TASK_ROUTING:
         temp_req = ChatCompletionRequest(model="auto", messages=messages, max_tokens=max_tokens)
-        task_type, confidence = classify_task(temp_req)
+        task_type, confidence = await classify_task_with_fallback(temp_req)
         atlas_model = resolve_atlas_model(task_type)
     else:
         atlas_model = model
@@ -186,6 +186,24 @@ async def atlas_endpoint(
 
     # Fallback: route to local model (Claude unavailable)
     log.warning(f"[atlas] Claude unavailable for {atlas_model}, falling back to local Ollama")
+
+    # 4.4 — multi-agent path
+    if multi_agent:
+        from a1.proxy.orchestrator import run_multi_agent
+        input_str = input_data if isinstance(input_data, str) else str(input_data)
+        context_msgs = [m for m in messages if m.role != "user"]
+        orchestrated = await run_multi_agent(input_str, context_msgs, max_tokens, provider_registry)
+        if orchestrated:
+            resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+            latency_ms = int((time.time() - start_time) * 1000)
+            meta = {
+                "provider": "orchestrator", "is_local": True, "task_type": task_type,
+                "atlas_model": atlas_model, "multi_agent": True, "latency_ms": latency_ms,
+            }
+            usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            return await _return_response_or_stream(stream, resp_id, atlas_model, orchestrated, usage, meta)
+        log.warning("[atlas] multi-agent orchestration produced no output, falling through to single-task")
+
     temp_req = ChatCompletionRequest(
         model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature
     )
@@ -198,7 +216,11 @@ async def atlas_endpoint(
 
     temp_req.model = model_name
     try:
-        result = await provider.complete(temp_req)
+        # 4.1 — use tool loop if tools are present, otherwise single call
+        if temp_req.tools:
+            result = await execute_tool_loop(provider, temp_req)
+        else:
+            result = await provider.complete(temp_req)
     except Exception as e:
         latency_ms = int((time.time() - start_time) * 1000)
         return {
@@ -214,6 +236,11 @@ async def atlas_endpoint(
 
     latency_ms = int((time.time() - start_time) * 1000)
     assistant_text = result.choices[0].message.content if result.choices else ""
+
+    # 4.3 — strip <think> tokens from deepseek-r1 responses
+    if model_name in _DEEPSEEK_R1_MODELS:
+        assistant_text = strip_think_tokens(assistant_text)
+
     is_local = provider_name == "ollama"
     cost = provider.estimate_cost(
         result.usage.prompt_tokens, result.usage.completion_tokens, model_name
