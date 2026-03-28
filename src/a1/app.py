@@ -125,10 +125,11 @@ def create_app() -> FastAPI:
 
     # Mount routers
     from a1.proxy.router import router as proxy_router
-    from a1.dashboard.router import router as dashboard_router
+    from a1.dashboard.router import router as dashboard_router, _ws_router as dashboard_ws_router
 
     app.include_router(proxy_router)
     app.include_router(dashboard_router)
+    app.include_router(dashboard_ws_router)
 
     # Request logging middleware — log ALL incoming requests for debugging
     from starlette.middleware.base import BaseHTTPMiddleware

@@ -8,6 +8,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from a1.common.auth import verify_api_key
 from a1.common.logging import get_logger
 from a1.common.metrics import metrics
 from a1.db.repositories import ConversationRepo, MessageRepo, QualityRepo, RoutingRepo, TrainingRepo
@@ -16,14 +17,25 @@ from a1.providers.registry import provider_registry
 from config.settings import settings
 
 log = get_logger("dashboard")
-router = APIRouter(prefix="/admin", tags=["dashboard"])
+
+# HTTP routes: protected by the verify_api_key router-level dependency.
+router = APIRouter(prefix="/admin", tags=["dashboard"], dependencies=[Depends(verify_api_key)])
+
+# WebSocket route is registered separately (no router-level dep) because browsers
+# cannot send Authorization headers during a WebSocket upgrade. Auth is enforced
+# inline via query-param token: ws://host/admin/ws/live-feed?token=<api_key>
+_ws_router = APIRouter(prefix="/admin", tags=["dashboard"])
 
 # --- WebSocket live feed ---
 _live_connections: list[WebSocket] = []
 
 
-@router.websocket("/ws/live-feed")
-async def live_feed(websocket: WebSocket):
+@_ws_router.websocket("/ws/live-feed")
+async def live_feed(websocket: WebSocket, token: str | None = Query(None)):
+    if settings.api_keys:
+        if token not in settings.api_keys:
+            await websocket.close(code=1008)  # 1008 = Policy Violation
+            return
     await websocket.accept()
     _live_connections.append(websocket)
     try:
