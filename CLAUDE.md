@@ -11,12 +11,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/Scripts/python -m pip install -e ".[dev]"     # + pytest, ruff, pytest-cov
 .venv/Scripts/python -m pip install -e ".[training]" # + unsloth, datasets, lm-eval
 
-# Run backend
-.venv/Scripts/python -m uvicorn src.a1.app:app --host 0.0.0.0 --port 8000 --reload
+# Run backend (MUST set PYTHONIOENCODING for Claude CLI emoji handling on Windows)
+PYTHONIOENCODING=utf-8 .venv/Scripts/python -m uvicorn src.a1.app:app --host 0.0.0.0 --port 8001
 
 # Tests
 .venv/Scripts/python -m pytest tests/ -v
-.venv/Scripts/python -m pytest tests/ --cov=src/a1
 
 # Lint
 ruff check src/ tests/
@@ -27,65 +26,108 @@ ruff format src/ tests/
 ```bash
 cd dashboard-ui
 npm install
-npm run dev       # :5173 with HMR
+npm run dev       # :5173 with HMR — proxies to http://localhost:8001
 npm run build     # production build → dist/
 ```
+The Vite proxy config in `dashboard-ui/vite.config.ts` must match the backend port (currently 8001).
 
 ### Database Migrations
 ```bash
 alembic upgrade head                          # apply all
 alembic revision --autogenerate -m "message"  # new migration
-alembic downgrade -1                          # rollback one
-```
-
-### Docker (infrastructure only)
-```bash
-docker compose up -d                          # postgres + redis
-docker compose --profile feedback up -d       # + argilla
-docker compose --profile observability up -d  # + jaeger
 ```
 
 ## Architecture
 
-A1 Trainer is an OpenAI-compatible LLM proxy that routes requests to local Ollama servers (preferred, free) or external providers (Claude, GPT, Gemini via LiteLLM). The unified model name **alpheric-1** auto-routes to the best available local model.
+**Alpheric.AI** is an enterprise AI middleware with the **Atlas** model family. It routes requests through Claude Opus (via CLI proxy) as the "teacher", streams responses to users in real-time, and trains local Ollama models in the background to eventually handle requests independently.
 
-### Request flow
-`POST /v1/chat/completions` → `proxy/router.py` → classify task type → select model via `routing/strategy.py` → check GPTCache → call provider → track tokens/cost → persist to DB → return response with `X-A1-*` headers.
+### Product: Alpheric.AI / Atlas Model Family
+- 7 Atlas models: `atlas-plan` (chat), `atlas-code` (code), `atlas-secure` (security), `atlas-infra` (devops), `atlas-data` (analytics), `atlas-books` (writing), `atlas-audit` (compliance)
+- Legacy alias `alpheric-1` maps to `atlas-plan`
+- Each model maps to a task type and preferred local fallback model
 
-When `model=alpheric-1`, it rewrites to `auto` and uses `best_quality` strategy. When `model=auto`, the classifier in `routing/classifier.py` determines task type (code, chat, math, etc.) and `routing/strategy.py` picks the best model from `config/routing_policy.yaml` cold-start defaults.
+### Request Flow
+Three entry points, all in `proxy/router.py`:
 
-### Provider abstraction
-All providers inherit from `providers/base.py:LLMProvider` (abstract methods: `complete`, `stream`, `health_check`, `supports_model`, `list_models`). The singleton `providers/registry.py:provider_registry` initializes providers at startup and maintains health state. To add a new provider: create a file in `providers/`, inherit `LLMProvider`, register it in `ProviderRegistry.initialize()`.
+1. **`POST /atlas`** — Primary endpoint. Auto-selects Atlas model from content classification, or accepts explicit model. Supports `stream:true` for SSE.
+2. **`POST /v1/responses`** — OpenAI Responses API format (used by OpenClaw). Maps `instructions` + `tools` + `input` to messages.
+3. **`POST /v1/chat/completions`** — Standard OpenAI-compatible endpoint.
 
-### Key singletons
-- `provider_registry` (`providers/registry.py`) — all provider instances + health
-- `metrics` (`common/metrics.py`) — in-memory request/latency/cost counters
-- `settings` (`config/settings.py`) — Pydantic BaseSettings, all env vars prefixed `A1_`
+All three follow the same pipeline:
+```
+Request → Session Memory (load history) → PII Masking → Task Classification
+  → Atlas Model Resolution → Claude CLI (distillation) or Local Ollama
+  → PII Unmask Response → Store in Session → Persist to DB → Return (JSON or SSE stream)
+```
+
+### Distillation Pipeline (`training/auto_trainer.py`)
+When `A1_DISTILLATION_ENABLED=true` (default), ALL Atlas model requests go to Claude Opus via CLI:
+1. Claude responds (teacher) — returned to user immediately
+2. Background: same request sent to best local Ollama model (student)
+3. Responses compared (Jaccard similarity)
+4. Stored in `DualExecutionRecord` table
+5. When 100+ samples accumulate per task type → auto-triggers QLoRA training
+6. After successful training → graduated handoff % increases (0% → 90% max)
+
+### Claude CLI Provider (`providers/claude_cli.py`)
+Proxies requests through the local `claude` command. Key details:
+- Uses `--output-format json` for accurate token counts and cost
+- Uses `--system-prompt` to inject Atlas identity ("You are Atlas by Alpheric.AI")
+- True streaming via stdout pipe reading (80-byte chunks)
+- **Windows requires `PYTHONIOENCODING=utf-8`** at process level or emojis in Claude's responses crash the cp1252 codec
+- Falls back to `llama3.2:latest` if Claude CLI fails
+
+### Session Memory (`session/manager.py`)
+In-memory LRU cache (1000 sessions, 1hr TTL). Sessions are resolved by:
+1. Explicit `session_id` in request
+2. `previous_response_id` → looks up which session produced that response
+3. Neither → creates new session
+
+Session history (last 20 messages) is prepended to messages before sending to Claude.
+
+### PII Masking (`security/pii_masker.py`)
+Detects and masks sensitive data (email, phone, SSN, credit card, API keys, IPs) before external API calls. Maintains a reversible `mask_map` so responses are unmasked for the user. Only applied for external providers (`pii_mask_for_external_only=true`).
+
+### SSE Streaming (`proxy/stream.py`)
+Two streaming formats:
+- `sse_stream()` — OpenAI chat completion chunks (`data: {...}\n\n`)
+- `sse_responses_stream_live()` — OpenAI Responses API events (`event: response.output_text.delta\ndata: {...}\n\n`). Accepts either a live `chunk_iterator` (true streaming) or pre-built `full_text` (simulated streaming).
+
+### Provider Abstraction
+All providers inherit from `providers/base.py:LLMProvider`. Active providers:
+- **`claude-cli`** — Claude Opus/Sonnet/Haiku via local CLI (handles OAuth internally)
+- **`ollama`** — 7 local models across 2 GPU servers (10.0.0.9 + 10.0.0.10)
+
+The singleton `providers/registry.py:provider_registry` initializes at startup. `get_provider_for_model()` prefers healthy providers.
+
+### Key Singletons
+- `provider_registry` (`providers/registry.py`) — provider instances + health state
+- `metrics` (`common/metrics.py`) — in-memory counters, time-series, model leaderboard, request history (resets on restart)
+- `settings` (`config/settings.py`) — Pydantic BaseSettings, `A1_` env prefix
+- `session_manager` (`session/manager.py`) — conversation memory
+- `pii_masker` (`security/pii_masker.py`) — PII detection engine
 
 ### Database
-SQLAlchemy async with 10 ORM models in `db/models.py`. Dev uses SQLite (`a1_trainer.db`), prod uses PostgreSQL. The `db/repositories.py` module provides typed query helpers (ConversationRepo, MessageRepo, RoutingRepo, etc.).
+SQLAlchemy async with SQLiteUUID TypeDecorator for UUID↔string conversion. Dev uses SQLite (`a1_trainer.db`), prod uses PostgreSQL. Key tables: `conversations`, `messages`, `routing_decisions`, `dual_execution_records`, `task_type_readiness`, `usage_records`.
 
-### Dashboard API
-`dashboard/router.py` exposes 25+ endpoints under `/admin/*` including a WebSocket live feed at `/admin/ws/live-feed`. The React frontend in `dashboard-ui/` connects to these and renders 10 pages.
-
-### Multi-server Ollama
-`providers/ollama.py` discovers models from all servers in `settings.ollama_servers` via `/api/tags`, maps each model to its server, and routes requests to the correct server. Currently: 10.0.0.9 (code models) and 10.0.0.10 (QA/reasoning models).
+### Dashboard
+11-page React SPA (Ant Design + Recharts + Zustand): Overview, Conversations, Routing, Providers, Accounts, Models, Playground, Training, Analytics, Import, Settings. API client in `dashboard-ui/src/lib/api.ts`.
 
 ## Configuration
 
-All settings are in `config/settings.py` with `A1_` env prefix, loaded from `.env`. Key groups:
-- **Database**: `A1_DATABASE_URL` (SQLite for dev, PostgreSQL for prod)
+All settings in `config/settings.py` with `A1_` prefix from `.env`:
+- **Atlas models**: `A1_ATLAS_MODELS` (JSON array)
+- **Distillation**: `A1_DISTILLATION_ENABLED`, `A1_DISTILLATION_CLAUDE_MODEL`, `A1_DISTILLATION_MIN_SAMPLES`
+- **Session**: `A1_SESSION_ENABLED`, `A1_SESSION_TTL_SECONDS`, `A1_SESSION_MAX_MESSAGES`
+- **PII**: `A1_PII_MASKING_ENABLED`, `A1_PII_MASK_FOR_EXTERNAL_ONLY`
 - **Ollama**: `A1_OLLAMA_SERVERS` (JSON array of server URLs)
-- **OpenClaw**: `A1_OPENCLAW_URL`, `A1_OPENCLAW_TOKEN`
-- **Feature flags**: `A1_USE_LITELLM`, `A1_CACHE_ENABLED`, `A1_USE_UNSLOTH`, `A1_USE_HARNESS_EVAL`
-- **Provider keys**: `A1_ANTHROPIC_API_KEY`, `A1_OPENAI_API_KEY`, `A1_VERTEX_PROJECT_ID`
-
-Provider model definitions live in `config/providers.yaml`. Task-to-model routing defaults live in `config/routing_policy.yaml`.
+- **Routing**: `config/routing_policy.yaml` (task→model defaults), `config/providers.yaml` (model metadata)
 
 ## Conventions
 
-- Backend async everywhere — all DB calls use `async with session`, all HTTP via `httpx.AsyncClient`
-- Tests use `pytest-asyncio` with `asyncio_mode = "auto"`
-- Ruff for linting: line-length 100, target Python 3.11
-- Dashboard uses Ant Design components, Zustand stores, Axios API client in `dashboard-ui/src/lib/api.ts`
-- Response headers `X-A1-Provider`, `X-A1-Is-Local`, `X-A1-Cost`, `X-A1-Tokens-In`, `X-A1-Tokens-Out`, `X-A1-Cache` are added to every proxy response
+- Async everywhere — DB, HTTP, subprocess calls all use async/await
+- Ruff: line-length 100, target Python 3.11
+- Dashboard: Ant Design components, Zustand stores, Axios in `lib/api.ts`
+- Atlas model routing defined in `ATLAS_TASK_MAP` dicts within `proxy/router.py`
+- `alpheric-1` is a backward-compatibility alias for `atlas-plan` (mapped in 3 places in router.py)
+- Windows: always start uvicorn with `PYTHONIOENCODING=utf-8` or Claude CLI responses will crash on emojis
