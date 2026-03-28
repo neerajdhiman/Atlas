@@ -38,3 +38,5 @@ class ChatCompletionRequest(BaseModel):
     # A1 extensions
     strategy: str | None = None  # best_quality, lowest_cost, lowest_latency
     conversation_id: str | None = None
+    session_id: str | None = None
+    previous_response_id: str | None = None

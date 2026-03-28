@@ -106,6 +106,42 @@ async def _persist_usage(
         log.error(f"Failed to persist usage: {e}")
 
 
+async def _load_session(
+    session_id: str | None,
+    previous_response_id: str | None,
+    user_id: str | None,
+    messages: list,
+) -> tuple:
+    """Prepend session history to messages. Returns (session_or_None, updated_messages)."""
+    if not settings.session_enabled:
+        return None, messages
+    from a1.session.manager import session_manager
+    from a1.proxy.request_models import MessageInput
+    session = session_manager.get_or_create(
+        session_id=session_id,
+        previous_response_id=previous_response_id,
+        user_id=user_id,
+    )
+    history = session.get_history(limit=settings.session_max_messages)
+    if not history:
+        return session, messages
+    sys_msgs = [m for m in messages if m.role == "system"]
+    non_sys = [m for m in messages if m.role != "system"]
+    hist_msgs = [MessageInput(role=h["role"], content=h["content"]) for h in history]
+    return session, sys_msgs + hist_msgs + non_sys
+
+
+def _mask_pii(messages: list) -> tuple:
+    """Mask PII in messages. Returns (masked_messages, mask_map)."""
+    if not settings.pii_masking_enabled:
+        return messages, {}
+    from a1.security.pii_masker import pii_masker
+    from a1.proxy.request_models import MessageInput
+    dicts = [{"role": m.role, "content": m.content or ""} for m in messages]
+    masked, mask_map = pii_masker.mask_messages(dicts)
+    return [MessageInput(role=d["role"], content=d["content"]) for d in masked], mask_map
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: ChatCompletionRequest,
@@ -114,8 +150,17 @@ async def chat_completions(
     db: AsyncSession = Depends(get_db),
 ):
     start_time = time.time()
-    messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
     api_key_hash = hash_key(api_key) if api_key != "dev" else None
+
+    # --- Session Memory ---
+    session, request.messages = await _load_session(
+        request.session_id, request.previous_response_id, request.user, request.messages
+    )
+
+    # --- PII Masking ---
+    mask_map: dict = {}
+    request.messages, mask_map = _mask_pii(request.messages)
+    messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
 
     # Optional OTLP tracing
     span = None
@@ -151,6 +196,15 @@ async def chat_completions(
             )
             if dual_result is not None:
                 return dual_result
+            # Claude failed — retry once before falling back
+            m = request.model
+            log.warning(f"Atlas {m} distillation failed, retrying")
+            dual_result = await handle_dual_execution(
+                request, response, forced_task, 0.9,
+            )
+            if dual_result is not None:
+                return dual_result
+            log.error(f"Atlas {m} failed twice, falling back")
 
         # Fallback: route to best local model for this task type
         request.model = "auto"
@@ -323,6 +377,23 @@ async def chat_completions(
         api_key_hash,
     ))
 
+    # PII unmask and session save
+    assistant_content = result.choices[0].message.content if result.choices else ""
+    if mask_map:
+        from a1.security.pii_masker import pii_masker
+        assistant_content = pii_masker.unmask(assistant_content, mask_map)
+        if result.choices:
+            result.choices[0].message.content = assistant_content
+    if session:
+        user_input = next(
+            (m.content for m in reversed(request.messages) if m.role == "user"), ""
+        )
+        session.add_message("user", user_input or "")
+        session.add_message("assistant", assistant_content or "")
+        resp_id = result.id if result.id else f"chatcmpl-{uuid.uuid4().hex[:12]}"
+        from a1.session.manager import session_manager
+        session_manager.link_response(resp_id, session.id)
+
     # Persist conversation to DB
     try:
         conv_repo = ConversationRepo(db)
@@ -339,7 +410,6 @@ async def chat_completions(
             await msg_repo.add(conv_id, m.role, m.content or "", seq)
             seq += 1
 
-        assistant_content = result.choices[0].message.content if result.choices else ""
         assistant_msg = await msg_repo.add(conv_id, "assistant", assistant_content or "", seq)
 
         await routing_repo.record(
@@ -369,6 +439,7 @@ async def responses_api(
     Returns: { id, object: "response", output: [{type: "message", content: [{type: "output_text", text}]}] }
     """
     start_time = time.time()
+    api_key_hash = hash_key(api_key) if api_key != "dev" else None
 
     # Parse the Responses API format
     model = request.get("model", "atlas-plan")
@@ -420,6 +491,22 @@ async def responses_api(
     if not messages:
         messages.append(MessageInput(role="user", content="Hello"))
 
+    # --- Session Memory ---
+    session_id = request.get("session_id")
+    previous_response_id = request.get("previous_response_id")
+    user_id = request.get("user")
+    # Capture user turn text before history injection
+    user_turn_text = input_data if isinstance(input_data, str) else (
+        next((m.get("content", "") for m in reversed(input_data)
+              if isinstance(m, dict) and m.get("role") == "user"), "")
+        if isinstance(input_data, list) else ""
+    )
+    session, messages = await _load_session(session_id, previous_response_id, user_id, messages)
+
+    # --- PII Masking ---
+    mask_map: dict = {}
+    messages, mask_map = _mask_pii(messages)
+
     model = LEGACY_ALIASES.get(model, model)
 
     # Atlas model family routing
@@ -444,13 +531,49 @@ async def responses_api(
             if dual_result is not None:
                 assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
                 resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+                if mask_map:
+                    from a1.security.pii_masker import pii_masker
+                    assistant_text = pii_masker.unmask(assistant_text, mask_map)
+                if session:
+                    session.add_message("user", user_turn_text or "")
+                    session.add_message("assistant", assistant_text or "")
+                    from a1.session.manager import session_manager as _sm
+                    _sm.link_response(resp_id, session.id)
                 usage = {"input_tokens": dual_result.usage.prompt_tokens,
                          "output_tokens": dual_result.usage.completion_tokens,
                          "total_tokens": dual_result.usage.total_tokens}
                 meta = {"provider": "claude-cli", "is_local": False,
                         "task_type": atlas_task, "distillation": True,
-                        "atlas_model": atlas_model_name}
+                        "atlas_model": atlas_model_name, "session_id": session.id if session else None}
                 return await _return_response_or_stream(stream, resp_id, atlas_model_name, assistant_text, usage, meta)
+            # Claude failed — retry once before falling back
+            log.warning(
+                f"[responses] Atlas distillation failed "
+                f"for {atlas_model_name}, retrying"
+            )
+            dual_result = await handle_dual_execution(temp_req, response, atlas_task, 0.9)
+            if dual_result is not None:
+                assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
+                resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+                if mask_map:
+                    from a1.security.pii_masker import pii_masker
+                    assistant_text = pii_masker.unmask(assistant_text, mask_map)
+                if session:
+                    session.add_message("user", user_turn_text or "")
+                    session.add_message("assistant", assistant_text or "")
+                    from a1.session.manager import session_manager as _sm
+                    _sm.link_response(resp_id, session.id)
+                usage = {"input_tokens": dual_result.usage.prompt_tokens,
+                         "output_tokens": dual_result.usage.completion_tokens,
+                         "total_tokens": dual_result.usage.total_tokens}
+                meta = {"provider": "claude-cli", "is_local": False,
+                        "task_type": atlas_task, "distillation": True,
+                        "atlas_model": atlas_model_name, "session_id": session.id if session else None}
+                return await _return_response_or_stream(stream, resp_id, atlas_model_name, assistant_text, usage, meta)
+            log.error(
+                f"[responses] Atlas {atlas_model_name} "
+                f"failed twice, falling back"
+            )
         model = "auto"
 
     # Build ChatCompletionRequest
@@ -462,11 +585,11 @@ async def responses_api(
     )
 
     # Resolve model
+    strategy = "best_quality"
     is_auto = chat_req.model.startswith("auto") or chat_req.model == "local"
     if is_auto:
         if task_type is None:
             task_type, confidence = classify_task(chat_req)
-        strategy = "best_quality"
         if chat_req.model == "auto:fast":
             strategy = "lowest_latency"
         elif chat_req.model == "auto:cheap":
@@ -535,6 +658,17 @@ async def responses_api(
     latency_ms = int((time.time() - start_time) * 1000)
     assistant_text = result.choices[0].message.content if result.choices else ""
 
+    # PII unmask and session save
+    if mask_map:
+        from a1.security.pii_masker import pii_masker
+        assistant_text = pii_masker.unmask(assistant_text, mask_map)
+    resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+    if session:
+        session.add_message("user", user_turn_text or "")
+        session.add_message("assistant", assistant_text or "")
+        from a1.session.manager import session_manager as _sm
+        _sm.link_response(resp_id, session.id)
+
     # Record metrics
     cost = provider.estimate_cost(
         result.usage.prompt_tokens, result.usage.completion_tokens, model_name
@@ -549,13 +683,47 @@ async def responses_api(
     response.headers["X-A1-Model"] = model_name
     response.headers["X-A1-Is-Local"] = str(is_local).lower()
 
+    # Persist usage in background
+    asyncio.create_task(_persist_usage(
+        provider_name, model_name, is_local,
+        result.usage.prompt_tokens, result.usage.completion_tokens, cost, latency_ms,
+        api_key_hash,
+    ))
+
+    # Persist conversation to DB
+    try:
+        conv_repo = ConversationRepo(db)
+        msg_repo = MessageRepo(db)
+        routing_repo = RoutingRepo(db)
+
+        conv = await conv_repo.create(source="proxy", user_id=request.get("user"))
+        conv_id = conv.id
+
+        seq = 0
+        for m in messages:
+            await msg_repo.add(conv_id, m.role, m.content or "", seq)
+            seq += 1
+
+        assistant_msg = await msg_repo.add(conv_id, "assistant", assistant_text or "", seq)
+
+        await routing_repo.record(
+            message_id=assistant_msg.id,
+            provider=provider_name, model=model_name, strategy=strategy,
+            task_type=task_type, confidence=confidence, latency_ms=latency_ms,
+            prompt_tokens=result.usage.prompt_tokens,
+            completion_tokens=result.usage.completion_tokens,
+            cost_usd=cost, is_local=is_local, api_key_hash=api_key_hash,
+        )
+    except Exception as e:
+        log.error(f"Failed to persist conversation: {e}")
+
     # Return Responses API format (JSON or SSE stream)
-    resp_id = f"resp_{uuid.uuid4().hex[:12]}"
     usage = {"input_tokens": result.usage.prompt_tokens,
              "output_tokens": result.usage.completion_tokens,
              "total_tokens": result.usage.total_tokens}
     meta = {"provider": provider_name, "is_local": is_local,
-            "task_type": task_type, "latency_ms": latency_ms, "cost_usd": cost}
+            "task_type": task_type, "latency_ms": latency_ms, "cost_usd": cost,
+            "session_id": session.id if session else None}
     return await _return_response_or_stream(stream, resp_id, model_name, assistant_text, usage, meta)
 
 
@@ -734,6 +902,9 @@ async def atlas_endpoint(
         if stream:
             from a1.training.auto_trainer import handle_dual_execution_stream
             chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9)
+            if chunk_iter is None:
+                log.warning("[atlas] Stream distillation failed, retrying")
+                chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9)
             if chunk_iter is not None:
                 meta = {"provider": "claude-cli", "is_local": False, "task_type": task_type,
                         "atlas_model": atlas_model, "distillation": True,
@@ -742,9 +913,12 @@ async def atlas_endpoint(
                     True, resp_id, atlas_model, None, {}, meta, chunk_iterator=chunk_iter,
                 )
 
-        # NON-STREAMING: wait for full response
+        # NON-STREAMING: wait for full response (retry once on failure)
         from a1.training.auto_trainer import handle_dual_execution
         dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9)
+        if dual_result is None:
+            log.warning(f"[atlas] Distillation failed for {atlas_model}, retrying Claude CLI once")
+            dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9)
         if dual_result is not None:
             assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
 
@@ -772,7 +946,11 @@ async def atlas_endpoint(
                     "pii_masked": len(mask_map) > 0}
             return await _return_response_or_stream(False, resp_id, atlas_model, assistant_text, usage, meta)
 
-    # Fallback: route to local model
+    # Fallback: route to local model (Claude unavailable)
+    log.warning(
+        f"[atlas] Claude unavailable for {atlas_model}, "
+        f"falling back to local Ollama"
+    )
     temp_req = ChatCompletionRequest(model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature)
     task_type_f, _ = classify_task(temp_req)
     model_name, provider_name = await select_model(task_type_f, "best_quality")
@@ -813,8 +991,17 @@ async def atlas_endpoint(
     usage = {"input_tokens": result.usage.prompt_tokens,
              "output_tokens": result.usage.completion_tokens,
              "total_tokens": result.usage.total_tokens}
-    meta = {"provider": provider_name, "actual_model": model_name, "is_local": is_local,
-            "task_type": task_type, "atlas_model": atlas_model, "cost_usd": cost, "latency_ms": latency_ms}
+    meta = {
+        "provider": provider_name,
+        "actual_model": model_name,
+        "is_local": is_local,
+        "task_type": task_type,
+        "atlas_model": atlas_model,
+        "cost_usd": cost,
+        "latency_ms": latency_ms,
+        "fallback_to_local": True,
+        "warning": "Claude CLI unavailable, used local model",
+    }
     return await _return_response_or_stream(stream, resp_id, atlas_model, assistant_text, usage, meta)
 
 
