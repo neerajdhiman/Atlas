@@ -309,8 +309,9 @@ async def create_training_run(
         dataset_size=0,  # will be updated during collection
         config=config,
     )
-    # TODO: Dispatch to ARQ worker
-    # await arq_pool.enqueue_job("run_training_pipeline", str(run.id))
+    from a1.dependencies import get_arq_pool
+    arq_pool = await get_arq_pool()
+    await arq_pool.enqueue_job("run_training_pipeline", str(run.id))
 
     return {"id": str(run.id), "status": "pending", "message": "Training run queued"}
 

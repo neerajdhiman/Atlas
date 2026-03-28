@@ -4,6 +4,8 @@ import os
 import uuid
 from datetime import datetime
 
+from arq.connections import RedisSettings
+
 from a1.common.logging import get_logger
 from a1.db.engine import async_session
 from a1.db.repositories import TrainingRepo
@@ -123,6 +125,6 @@ async def run_training_pipeline(ctx: dict, run_id: str) -> dict:
 
 # ARQ worker settings
 class WorkerSettings:
-    redis_settings = None  # Set from config at worker startup
+    redis_settings = RedisSettings.from_dsn(settings.redis_url)
     functions = [run_training_pipeline]
     max_jobs = 1  # Only one training job at a time

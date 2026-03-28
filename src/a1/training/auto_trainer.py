@@ -374,8 +374,10 @@ async def _check_and_trigger_training(session: AsyncSession, task_type: str, sam
     readiness.last_training_run_id = str(run.id)
 
     log.info(f"Training run created: {run.id} for {task_type}")
-    # Note: In production, this would enqueue an ARQ job:
-    # await arq_pool.enqueue_job("run_training_pipeline", str(run.id))
+    from a1.dependencies import get_arq_pool
+    arq_pool = await get_arq_pool()
+    await arq_pool.enqueue_job("run_training_pipeline", str(run.id))
+    log.info(f"Training job dispatched to ARQ: run_id={run.id}")
 
 
 async def update_handoff_after_training(task_type: str, eval_results: dict):

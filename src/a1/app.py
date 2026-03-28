@@ -64,6 +64,17 @@ async def lifespan(app: FastAPI):
 
     _health_task = asyncio.create_task(_health_refresh_loop())
 
+    # Initialize ARQ pool + verify Redis reachable
+    from a1.common.logging import get_logger
+    _startup_log = get_logger("startup")
+    try:
+        from a1.dependencies import init_arq_pool
+        _arq = await init_arq_pool()
+        await _arq.ping()
+        _startup_log.info("ARQ pool initialized — Redis reachable")
+    except Exception as _e:
+        _startup_log.warning(f"ARQ pool init failed (training dispatch unavailable): {_e}")
+
     # Warm up local Ollama models (background, non-blocking)
     if settings.warm_up_models:
         from a1.common.logging import get_logger
@@ -89,9 +100,11 @@ async def lifespan(app: FastAPI):
 
     # Cleanup
     _health_task.cancel()
-    from a1.dependencies import _redis
+    from a1.dependencies import _redis, _arq_pool
     if _redis:
         await _redis.aclose()
+    if _arq_pool:
+        await _arq_pool.aclose()
 
 
 def create_app() -> FastAPI:

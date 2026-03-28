@@ -30,6 +30,20 @@ services:
     volumes:
       - ollama_data:/root/.ollama
 
+  arq-worker:
+    build: .
+    command: ["python", "-m", "arq", "a1.training.tasks.WorkerSettings"]
+    environment:
+      A1_DATABASE_URL: postgresql+asyncpg://a1:a1_dev_password@postgres:5432/a1_trainer
+      A1_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./training_outputs:/app/training_outputs
+
   # --- Open-source integrations (optional) ---
 
   argilla:
