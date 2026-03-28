@@ -2,12 +2,17 @@
 
 import random
 
+from sqlalchemy import func, select, text
+
 from a1.common.logging import get_logger
 from a1.providers.registry import provider_registry
-from a1.routing.scorer import get_cold_start_model
+from a1.routing.scorer import ModelCandidate, get_cold_start_model, score_candidates
 from config.settings import settings
 
 log = get_logger("routing.strategy")
+
+# Minimum routing_decisions samples required before live scorer activates
+_LIVE_SCORER_MIN_SAMPLES = 20
 
 
 # Model -> provider mapping (derived from providers.yaml)
@@ -33,14 +38,73 @@ def _get_provider_for(model: str) -> str:
     return "ollama"  # fallback to local
 
 
+async def _build_candidates_from_db(task_type: str) -> list[ModelCandidate]:
+    """Query routing_decisions for per-model avg latency/cost when 20+ samples exist.
+
+    Returns a ModelCandidate list for passing to score_candidates().
+    """
+    try:
+        from a1.db.engine import async_session
+        from a1.db.models import RoutingDecision
+
+        async with async_session() as session:
+            stmt = (
+                select(
+                    RoutingDecision.model,
+                    RoutingDecision.provider,
+                    func.avg(RoutingDecision.latency_ms).label("avg_latency_ms"),
+                    func.avg(RoutingDecision.cost_usd).label("avg_cost_usd"),
+                    func.count(RoutingDecision.id).label("sample_count"),
+                )
+                .where(RoutingDecision.task_type == task_type)
+                .group_by(RoutingDecision.model, RoutingDecision.provider)
+                .having(func.count(RoutingDecision.id) >= _LIVE_SCORER_MIN_SAMPLES)
+            )
+            result = await session.execute(stmt)
+            rows = result.all()
+
+        candidates = [
+            ModelCandidate(
+                provider=row.provider,
+                model=row.model,
+                avg_quality=0.0,  # quality scoring deferred until eval signals exist
+                avg_latency_ms=float(row.avg_latency_ms),
+                avg_cost_usd=float(row.avg_cost_usd),
+                sample_count=row.sample_count,
+            )
+            for row in rows
+        ]
+        return candidates
+    except Exception as e:
+        log.warning(f"Failed to build candidates from DB for {task_type}: {e}")
+        return []
+
+
 async def select_model(task_type: str, strategy: str) -> tuple[str, str]:
     """Select the best model for a task type and strategy.
     Returns (model_name, provider_name).
-    """
-    # TODO: Once enough data in model_performance table, use learned scorer.
-    # For now, use cold-start defaults from routing_policy.yaml.
 
+    For lowest_cost and lowest_latency strategies, uses live performance data from
+    routing_decisions when 20+ samples exist per model. Falls back to cold-start
+    defaults from routing_policy.yaml when insufficient data.
+    """
     model, fallbacks = get_cold_start_model(task_type)
+
+    # Live scorer: activated for cost/latency strategies when enough data exists
+    if strategy in ("lowest_cost", "lowest_latency"):
+        candidates = await _build_candidates_from_db(task_type)
+        if candidates:
+            ranked = score_candidates(candidates, strategy)
+            for candidate in ranked:
+                provider_name = _get_provider_for(candidate.model)
+                if provider_registry.is_healthy(provider_name):
+                    log.info(
+                        f"Live scorer: {strategy} selected {candidate.model} "
+                        f"(latency={candidate.avg_latency_ms:.0f}ms "
+                        f"cost=${candidate.avg_cost_usd:.4f} "
+                        f"n={candidate.sample_count}) for {task_type}"
+                    )
+                    return candidate.model, provider_name
 
     # Epsilon-greedy exploration: with probability epsilon, pick a random alternative
     if random.random() < settings.exploration_rate and fallbacks:
@@ -51,9 +115,18 @@ async def select_model(task_type: str, strategy: str) -> tuple[str, str]:
 
     # Check provider health; fall back if unhealthy
     if not provider_registry.is_healthy(provider_name):
+        down_secs = provider_registry.get_unhealthy_duration(provider_name)
+        if down_secs is not None and down_secs >= 300:
+            log.critical(
+                f"Provider {provider_name} has been unhealthy for {down_secs:.0f}s — escalation required"
+            )
         log.warning(f"Provider {provider_name} unhealthy, trying fallbacks")
+        seen_providers: set[str] = {provider_name}
         for fb_model in fallbacks:
             fb_provider = _get_provider_for(fb_model)
+            if fb_provider in seen_providers:
+                continue  # skip: already determined this provider is unhealthy in this chain
+            seen_providers.add(fb_provider)
             if provider_registry.is_healthy(fb_provider):
                 return fb_model, fb_provider
 

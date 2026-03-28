@@ -296,6 +296,7 @@ class TaskTypeReadiness(Base):
     claude_sample_count: Mapped[int] = mapped_column(Integer, default=0)
     local_avg_quality: Mapped[float] = mapped_column(Float, default=0.0)
     local_handoff_pct: Mapped[float] = mapped_column(Float, default=0.0)  # 0.0 to 1.0
+    max_local_pct: Mapped[float] = mapped_column(Float, default=0.9)  # per-task cap, overrides global setting
     best_local_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_training_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

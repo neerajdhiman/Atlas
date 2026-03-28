@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import yaml
 
@@ -92,6 +93,7 @@ class ProviderRegistry:
     def __init__(self):
         self._providers: dict[str, LLMProvider] = {}
         self._health: dict[str, bool] = {}
+        self._unhealthy_since: dict[str, float | None] = {}  # circuit breaker: epoch seconds when provider first went unhealthy
 
     async def initialize(self):
         """Register all configured providers and check health."""
@@ -167,11 +169,17 @@ class ProviderRegistry:
             name: asyncio.create_task(provider.health_check())
             for name, provider in self._providers.items()
         }
+        now = time.time()
         for name, task in tasks.items():
+            was_healthy = self._health.get(name, True)
             try:
                 self._health[name] = await task
             except Exception:
                 self._health[name] = False
+            if self._health[name]:
+                self._unhealthy_since[name] = None  # recovered
+            elif was_healthy:
+                self._unhealthy_since[name] = now  # first failure
             status = "healthy" if self._health[name] else "unhealthy"
             log.info(f"Provider {name}: {status}")
 
@@ -192,6 +200,13 @@ class ProviderRegistry:
 
     def is_healthy(self, name: str) -> bool:
         return self._health.get(name, False)
+
+    def get_unhealthy_duration(self, name: str) -> float | None:
+        """Seconds since the provider first went unhealthy, or None if healthy/unknown."""
+        since = self._unhealthy_since.get(name)
+        if since is None:
+            return None
+        return time.time() - since
 
     def list_all_models(self) -> list[ModelInfo]:
         models = []

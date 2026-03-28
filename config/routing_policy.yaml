@@ -15,6 +15,12 @@ task_defaults:
       - claude-sonnet-4-20250514          # External (paid, highest quality)
       - gpt-4o                            # External (paid)
 
+  infra:
+    model: deepseek-r1:8b                # Server 2 (local, reasoning — IaC is declarative config generation)
+    fallback:
+      - mistral:7b                        # Server 2 (local)
+      - claude-sonnet-4-20250514          # External (paid, strong reasoning)
+
   chat:
     model: llama3.2:latest                # Server 1 (local, fast for chat)
     fallback:

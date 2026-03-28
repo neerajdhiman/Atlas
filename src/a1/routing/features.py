@@ -3,6 +3,7 @@
 import re
 from dataclasses import dataclass
 
+from a1.common.tokens import count_tokens
 from a1.proxy.request_models import ChatCompletionRequest
 
 
@@ -55,13 +56,13 @@ def _max_tokens_bucket(max_tokens: int | None) -> str:
 def extract_features(request: ChatCompletionRequest) -> RequestFeatures:
     """Extract features from a chat completion request. Must be fast (<1ms)."""
     full_text = " ".join(m.content or "" for m in request.messages)
-    word_count = len(full_text.split())
+    token_count = count_tokens(full_text)
 
     has_system = any(m.role == "system" for m in request.messages)
     user_turns = sum(1 for m in request.messages if m.role == "user")
 
     return RequestFeatures(
-        token_count_bucket=_token_bucket(word_count),
+        token_count_bucket=_token_bucket(token_count),
         has_system_prompt=has_system,
         has_tools=bool(request.tools),
         has_code_markers=bool(CODE_PATTERNS.search(full_text)),

@@ -393,9 +393,11 @@ async def update_handoff_after_training(task_type: str, eval_results: dict):
                 readiness = await repo.get_or_create(task_type)
 
                 if improved and improvement > 0.02:  # >2% improvement
+                    # Use per-task cap from DB; fall back to global setting if not set
+                    cap = getattr(readiness, "max_local_pct", None) or settings.distillation_max_handoff_pct
                     new_pct = min(
                         readiness.local_handoff_pct + settings.distillation_handoff_increment,
-                        settings.distillation_max_handoff_pct,
+                        cap,
                     )
                     readiness.local_handoff_pct = new_pct
                     readiness.local_avg_quality = eval_results.get("avg_finetuned_loss", 0.0)
