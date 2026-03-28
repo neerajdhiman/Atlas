@@ -88,6 +88,9 @@ export interface MetricsSnapshot {
   provider_counts: Record<string, number>;
   model_counts: Record<string, number>;
   task_type_counts: Record<string, number>;
+  local?: { request_count: number; total_tokens: number };
+  external?: { request_count: number; total_tokens: number; cost_usd: number };
+  savings_usd?: number;
 }
 
 export interface OverviewData {

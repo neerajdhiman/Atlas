@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { message } from 'antd';
 import { useAuthStore } from '../stores/authStore';
 
 const api = axios.create({
@@ -16,14 +17,20 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Response interceptor: handle auth errors
+// Response interceptor: global error handling
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     if (error.response?.status === 401) {
       useAuthStore.getState().logout();
+    } else if (error.code !== 'ERR_CANCELED') {
+      const msg =
+        error.response?.data?.detail ||
+        error.response?.data?.message ||
+        error.message ||
+        'An unexpected error occurred';
+      message.error(String(msg));
     }
-    // Let pages handle their own error display
     return Promise.reject(error);
   }
 );
