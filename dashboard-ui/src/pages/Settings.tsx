@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Typography, Card, Form, Input, InputNumber, Select, Slider, Button, Collapse, Space, Divider, App } from 'antd';
-import { KeyOutlined, BranchesOutlined, ExperimentOutlined, SaveOutlined, CloudServerOutlined } from '@ant-design/icons';
+import { Typography, Card, Form, Input, InputNumber, Select, Slider, Button, Space, App } from 'antd';
+import { KeyOutlined, BranchesOutlined, ExperimentOutlined, SaveOutlined } from '@ant-design/icons';
 import { getSettings, saveSettings } from '../lib/api';
 import PageSkeleton from '../components/shared/PageSkeleton';
 

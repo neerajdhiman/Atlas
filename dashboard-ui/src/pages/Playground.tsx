@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   Typography, Card, Button, Input, Select, Slider, Row, Col, Space, Tag, Spin,
-  Statistic, Divider, App, Tooltip,
+  Statistic, App, Tooltip,
 } from 'antd';
 import {
   SendOutlined, ThunderboltOutlined, DollarOutlined, ClockCircleOutlined,

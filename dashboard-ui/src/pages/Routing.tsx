@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
 import {
-  Typography, Card, Table, Tag, Space, Select, Row, Col, Statistic, Button,
-  Progress, Tooltip, Badge, Divider, App,
+  Typography, Card, Table, Tag, Space, Row, Col, Statistic, Button,
+  Progress, Badge,
 } from 'antd';
-import type { ColumnsType } from 'antd/es/table';
 import {
   BranchesOutlined, ClockCircleOutlined, ThunderboltOutlined, DollarOutlined,
   CheckCircleOutlined, ReloadOutlined, RocketOutlined, SafetyCertificateOutlined,
@@ -15,7 +14,7 @@ import {
   ResponsiveContainer, PieChart, Pie, Cell,
 } from 'recharts';
 import {
-  getRoutingDecisions, getRoutingPerformance, getModelLeaderboard,
+  getRoutingDecisions, getModelLeaderboard,
   getRecentRequests, getDistillationOverview, getOverview,
 } from '../lib/api';
 import ExportDropdown from '../components/shared/ExportDropdown';
@@ -44,9 +43,9 @@ export default function Routing() {
   const [distillation, setDistillation] = useState<any>(null);
   const [overview, setOverview] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [taskFilter, setTaskFilter] = useState<string | undefined>();
+  const [taskFilter] = useState<string | undefined>();
   const [dateRange, setDateRange] = useState<[string | null, string | null]>([null, null]);
-  const { message } = App.useApp();
+
 
   const load = () => {
     setLoading(true);

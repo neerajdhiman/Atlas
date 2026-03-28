@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Typography, Card, Table, Tag, Button, Modal, Form, Input, Select, Space, Row, Col, Spin, App } from 'antd';
-import { CloudServerOutlined, PlayCircleOutlined, DeleteOutlined, ThunderboltOutlined, SwapOutlined } from '@ant-design/icons';
+import { CloudServerOutlined, DeleteOutlined, SwapOutlined } from '@ant-design/icons';
 
 import api from '../lib/api';
 const getOllamaModels = () => api.get('/admin/ollama/models').then(r => r.data);

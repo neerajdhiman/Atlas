@@ -1,17 +1,15 @@
 import { useEffect, useState } from 'react';
-import { Typography, Card, Statistic, Row, Col, Table, Tag, Space, Progress } from 'antd';
+import { Typography, Card, Statistic, Row, Col, Table, Tag, Progress } from 'antd';
 import {
-  ThunderboltOutlined, DollarOutlined, FieldNumberOutlined, ClockCircleOutlined,
-  ArrowUpOutlined, ArrowDownOutlined, CheckCircleOutlined, ApiOutlined,
-  BarChartOutlined, PieChartOutlined,
+  ThunderboltOutlined, FieldNumberOutlined, ClockCircleOutlined,
+  CheckCircleOutlined, BarChartOutlined,
 } from '@ant-design/icons';
 import {
   BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, AreaChart, Area, LineChart, Line,
+  ResponsiveContainer, AreaChart, Area,
 } from 'recharts';
 import {
   getMetrics, getRoutingDecisions, getModelLeaderboard, getTokenTimeseries,
-  getCostTimeseries, getLocalVsExternal,
 } from '../lib/api';
 import DateRangeFilter from '../components/shared/DateRangeFilter';
 import PageSkeleton from '../components/shared/PageSkeleton';
@@ -23,8 +21,6 @@ export default function Analytics() {
   const [decisions, setDecisions] = useState<any[]>([]);
   const [leaderboard, setLeaderboard] = useState<any[]>([]);
   const [tokenSeries, setTokenSeries] = useState<any[]>([]);
-  const [costSeries, setCostSeries] = useState<any[]>([]);
-  const [localExt, setLocalExt] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [dateRange, setDateRange] = useState<[string | null, string | null]>([null, null]);
 
@@ -34,15 +30,11 @@ export default function Analytics() {
       getRoutingDecisions({ limit: 200 }),
       getModelLeaderboard().catch(() => ({ data: [] })),
       getTokenTimeseries().catch(() => ({ data: [] })),
-      getCostTimeseries().catch(() => ({ data: [] })),
-      getLocalVsExternal().catch(() => ({})),
-    ]).then(([m, d, lb, ts, cs, le]) => {
+    ]).then(([m, d, lb, ts]) => {
       setMetrics(m);
       setDecisions(d.data || []);
       setLeaderboard(lb.data || []);
       setTokenSeries(ts.data || []);
-      setCostSeries(cs.data || []);
-      setLocalExt(le);
     }).catch(() => {}).finally(() => setLoading(false));
   }, []);
 

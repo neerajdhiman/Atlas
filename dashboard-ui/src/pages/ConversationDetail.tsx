@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { Card, Tag, Button, Descriptions, Typography, Space, App, Tooltip } from 'antd';
+import { Card, Tag, Button, Descriptions, Typography, Space, App, Tooltip, Result, Collapse } from 'antd';
 import {
   ArrowLeftOutlined,
   LikeOutlined,
@@ -9,6 +9,7 @@ import {
   RobotOutlined,
   ToolOutlined,
   CopyOutlined,
+  CodeOutlined,
 } from '@ant-design/icons';
 import { getConversation, addFeedback } from '../lib/api';
 import PageSkeleton from '../components/shared/PageSkeleton';
@@ -36,7 +37,21 @@ export default function ConversationDetail() {
   }, [id]);
 
   if (loading) return <PageSkeleton type="detail" />;
-  if (!conv) return <div>Conversation not found</div>;
+
+  if (!conv) {
+    return (
+      <Result
+        status="404"
+        title="Conversation Not Found"
+        subTitle="This conversation does not exist or has been removed."
+        extra={
+          <Link to="/conversations">
+            <Button icon={<ArrowLeftOutlined />}>Back to Conversations</Button>
+          </Link>
+        }
+      />
+    );
+  }
 
   const handleFeedback = async (messageId: string, value: number) => {
     await addFeedback(conv.id, messageId, value);
@@ -47,6 +62,9 @@ export default function ConversationDetail() {
     navigator.clipboard.writeText(content);
     messageApi.success('Copied to clipboard');
   };
+
+  const hasTotals = conv.total_prompt_tokens || conv.total_completion_tokens || conv.total_cost_usd;
+  const hasMetadata = conv.metadata && Object.keys(conv.metadata).length > 0;
 
   return (
     <div style={{ maxWidth: 900 }}>
@@ -60,11 +78,45 @@ export default function ConversationDetail() {
 
       <Card size="small" style={{ marginBottom: 16 }}>
         <Descriptions column={{ xs: 1, sm: 2, md: 3 }} size="small">
-          <Descriptions.Item label="ID"><Text copyable style={{ fontFamily: 'monospace', fontSize: 12 }}>{conv.id}</Text></Descriptions.Item>
+          <Descriptions.Item label="ID">
+            <Text copyable style={{ fontFamily: 'monospace', fontSize: 12 }}>{conv.id}</Text>
+          </Descriptions.Item>
           <Descriptions.Item label="User">{conv.user_id || '—'}</Descriptions.Item>
-          <Descriptions.Item label="Created">{conv.created_at ? dayjs(conv.created_at).format('YYYY-MM-DD HH:mm:ss') : '—'}</Descriptions.Item>
+          <Descriptions.Item label="Created">
+            {conv.created_at ? dayjs(conv.created_at).format('YYYY-MM-DD HH:mm:ss') : '—'}
+          </Descriptions.Item>
           <Descriptions.Item label="Messages">{conv.messages?.length ?? 0}</Descriptions.Item>
+          {hasTotals && (
+            <>
+              <Descriptions.Item label="Total Tokens">
+                <Text style={{ fontSize: 12 }}>
+                  {conv.total_prompt_tokens}+{conv.total_completion_tokens}
+                  <Text type="secondary" style={{ fontSize: 11 }}> ({(conv.total_prompt_tokens + conv.total_completion_tokens).toLocaleString()} total)</Text>
+                </Text>
+              </Descriptions.Item>
+              <Descriptions.Item label="Total Cost">
+                <Text style={{ fontSize: 12 }}>${conv.total_cost_usd?.toFixed(4)}</Text>
+              </Descriptions.Item>
+            </>
+          )}
         </Descriptions>
+
+        {hasMetadata && (
+          <Collapse
+            ghost
+            size="small"
+            style={{ marginTop: 8 }}
+            items={[{
+              key: 'meta',
+              label: <Space><CodeOutlined /><Text type="secondary" style={{ fontSize: 11 }}>Metadata</Text></Space>,
+              children: (
+                <pre style={{ fontSize: 11, margin: 0, padding: 8, background: 'rgba(0,0,0,0.15)', borderRadius: 4, overflowX: 'auto' }}>
+                  {JSON.stringify(conv.metadata, null, 2)}
+                </pre>
+              ),
+            }]}
+          />
+        )}
       </Card>
 
       <Space direction="vertical" size={12} style={{ width: '100%' }}>

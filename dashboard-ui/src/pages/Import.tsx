@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Typography, Card, Form, Input, Button, Result, Alert, Space, Upload, Divider, App } from 'antd';
-import { ImportOutlined, UploadOutlined, InboxOutlined, CheckCircleOutlined } from '@ant-design/icons';
+import { Typography, Card, Form, Input, Button, Result, Alert, Space, Upload, App } from 'antd';
+import { ImportOutlined, UploadOutlined, InboxOutlined } from '@ant-design/icons';
 import { triggerPaperclipImport } from '../lib/api';
 
 const { Dragger } = Upload;

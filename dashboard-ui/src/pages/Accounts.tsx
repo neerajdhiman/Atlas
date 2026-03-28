@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Typography, Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Space, Progress, Switch, App } from 'antd';
-import { PlusOutlined, DeleteOutlined, CheckCircleOutlined, ApiOutlined } from '@ant-design/icons';
+import { Typography, Card, Table, Tag, Button, Modal, Form, Input, InputNumber, Select, Space, Progress, App } from 'antd';
+import { PlusOutlined, DeleteOutlined, CheckCircleOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 
 // API functions inline since they're not yet in api.ts

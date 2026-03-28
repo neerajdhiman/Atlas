@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { User, Role } from '../types/auth';
+import { ROLE_WRITE_ACCESS } from '../lib/constants';
 
 interface AuthState {
   user: User | null;
@@ -38,7 +39,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   },
 
   hasWriteAccess: (action) => {
-    const { ROLE_WRITE_ACCESS } = require('../lib/constants');
     const user = get().user;
     if (!user) return false;
     const allowed = ROLE_WRITE_ACCESS[action];

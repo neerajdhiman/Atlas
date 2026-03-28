@@ -1,13 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Typography, Table, Tag, Input, Space, Card, Row, Col, Statistic, Badge, Button,
-  Tooltip, App, Progress, Segmented,
+  Tooltip, Segmented, Select,
 } from 'antd';
 import type { ColumnsType, TablePaginationConfig } from 'antd/es/table';
 import {
   MessageOutlined, UserOutlined, ClockCircleOutlined, ThunderboltOutlined,
   CloudServerOutlined, SearchOutlined, ReloadOutlined, RocketOutlined,
   BranchesOutlined, DatabaseOutlined, ExperimentOutlined, SafetyCertificateOutlined,
+  RobotOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RTooltip } from 'recharts';
@@ -41,17 +42,26 @@ export default function Conversations() {
   const [pageSize, setPageSize] = useState(25);
   const [search, setSearch] = useState('');
   const [dateRange, setDateRange] = useState<[string | null, string | null]>([null, null]);
+  const [sourceFilter, setSourceFilter] = useState<string | undefined>(undefined);
   const [view, setView] = useState<'conversations' | 'sessions'>('conversations');
   const navigate = useNavigate();
 
-  const load = () => {
+  // Track previous filter values to detect changes and reset page
+  const prevFilters = useRef({ search, dateRange, sourceFilter });
+
+  const buildQueryParams = (p: number, ps: number) => ({
+    limit: ps,
+    offset: (p - 1) * ps,
+    search: search || undefined,
+    date_from: dateRange[0] || undefined,
+    date_to: dateRange[1] || undefined,
+    source: sourceFilter,
+  });
+
+  const load = (p: number, ps: number) => {
     setLoading(true);
     Promise.all([
-      getConversations({
-        limit: pageSize, offset: (page - 1) * pageSize,
-        search: search || undefined,
-        date_from: dateRange[0] || undefined, date_to: dateRange[1] || undefined,
-      }),
+      getConversations(buildQueryParams(p, ps)),
       getConversationStats().catch(() => null),
       getDistillationOverview().catch(() => null),
       getSessions().catch(() => ({ data: [] })),
@@ -67,15 +77,37 @@ export default function Conversations() {
       .finally(() => setLoading(false));
   };
 
-  useEffect(load, [page, pageSize, search, dateRange]);
+  useEffect(() => {
+    const prev = prevFilters.current;
+    const filtersChanged =
+      prev.search !== search ||
+      prev.dateRange[0] !== dateRange[0] ||
+      prev.dateRange[1] !== dateRange[1] ||
+      prev.sourceFilter !== sourceFilter;
+    prevFilters.current = { search, dateRange, sourceFilter };
+    // If a filter changed and page is not 1, reset to 1; the resulting page change re-triggers this effect
+    if (filtersChanged && page !== 1) {
+      setPage(1);
+    } else {
+      load(page, pageSize);
+    }
+  }, [page, pageSize, search, dateRange, sourceFilter]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const fetchAllForExport = async () => {
+    const res = await getConversations({ ...buildQueryParams(1, 10000) });
+    return res.data || [];
+  };
 
   // Source pie data
   const sourcePie = stats?.sources
     ? Object.entries(stats.sources).map(([name, count]) => ({ name, value: count as number }))
     : [];
 
-  // Distillation sample total
-  const distSamples = (distillation?.task_types || []).reduce((s: number, t: any) => s + t.claude_samples, 0);
+  // Distillation samples: count both claude and local comparison records
+  const distSamples = (distillation?.task_types || []).reduce(
+    (s: number, t: any) => s + (t.claude_samples || 0),
+    0,
+  );
 
   const columns: ColumnsType<any> = [
     {
@@ -92,8 +124,6 @@ export default function Conversations() {
         const cfg = SOURCE_CONFIG[s] || { label: s, color: 'default', icon: <BranchesOutlined /> };
         return <Tag icon={cfg.icon} color={cfg.color} style={{ fontSize: 10 }}>{cfg.label}</Tag>;
       },
-      filters: Object.entries(SOURCE_CONFIG).map(([k, v]) => ({ text: v.label, value: k })),
-      onFilter: (value, record) => record.source === value,
     },
     {
       title: 'User', dataIndex: 'user_id', width: 130,
@@ -102,14 +132,21 @@ export default function Conversations() {
       ) : <span style={{ color: '#4b5563', fontSize: 11 }}>anonymous</span>,
     },
     {
-      title: 'Messages', dataIndex: 'message_count', width: 85,
+      title: 'Turns', dataIndex: 'message_count', width: 70,
       sorter: (a, b) => a.message_count - b.message_count,
       render: (c: number) => (
-        <Space size={4}>
-          <Badge count={c} showZero color={c > 5 ? '#3b82f6' : c > 0 ? '#10b981' : '#6b7280'} style={{ fontSize: 10 }} overflowCount={999} />
-          <span style={{ fontSize: 10, color: '#6b7280' }}>{c > 0 ? `${Math.ceil(c / 2)} turns` : ''}</span>
-        </Space>
+        <Badge count={c} showZero color={c > 5 ? '#3b82f6' : c > 0 ? '#10b981' : '#6b7280'}
+          style={{ fontSize: 10 }} overflowCount={999} />
       ),
+    },
+    {
+      title: 'Model / Task', key: 'model', width: 140,
+      render: (_: any, row: any) => row.model ? (
+        <Space size={2} direction="vertical" style={{ gap: 2 }}>
+          <Tag color="purple" style={{ fontSize: 10, margin: 0 }}><RobotOutlined /> {row.model}</Tag>
+          {row.task_type && <Tag color="gold" style={{ fontSize: 9, margin: 0 }}>{row.task_type}</Tag>}
+        </Space>
+      ) : <span style={{ color: '#4b5563', fontSize: 11 }}>—</span>,
     },
     {
       title: 'Created', dataIndex: 'created_at', width: 150,
@@ -127,7 +164,11 @@ export default function Conversations() {
   const sessionColumns: ColumnsType<any> = [
     {
       title: 'Session ID', dataIndex: 'id', width: 100,
-      render: (id: string) => <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{id.slice(0, 8)}...</span>,
+      render: (id: string) => (
+        <Tooltip title={id}>
+          <span style={{ fontFamily: 'monospace', fontSize: 11 }}>{id.slice(0, 8)}</span>
+        </Tooltip>
+      ),
     },
     { title: 'User', dataIndex: 'user_id', width: 120, render: (u: string | null) => u || <span style={{ color: '#4b5563' }}>—</span> },
     {
@@ -136,10 +177,12 @@ export default function Conversations() {
     },
     {
       title: 'Age', dataIndex: 'age_seconds', width: 100,
+      sorter: (a, b) => a.age_seconds - b.age_seconds,
       render: (s: number) => s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`,
     },
     {
       title: 'Last Active', dataIndex: 'last_activity', width: 140,
+      sorter: (a, b) => (a.last_activity || 0) - (b.last_activity || 0),
       render: (t: number) => t ? dayjs.unix(t).fromNow() : '—',
     },
   ];
@@ -161,8 +204,8 @@ export default function Conversations() {
           </Typography.Text>
         </div>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={load} size="small">Refresh</Button>
-          <ExportDropdown data={data} filename="conversations" />
+          <Button icon={<ReloadOutlined />} onClick={() => load(page, pageSize)} size="small">Refresh</Button>
+          <ExportDropdown data={data} filename="conversations" fetchAll={fetchAllForExport} />
         </Space>
       </div>
 
@@ -171,11 +214,11 @@ export default function Conversations() {
         {[
           { title: 'Conversations', value: stats?.total_conversations ?? total, icon: <MessageOutlined />, color: '#3b82f6' },
           { title: 'Messages', value: stats?.total_messages ?? 0, icon: <ThunderboltOutlined />, color: '#8b5cf6' },
-          { title: 'Unique Users', value: stats?.unique_users ?? 0, icon: <UserOutlined />, color: '#10b981' },
-          { title: 'Avg Msgs/Conv', value: stats?.avg_messages_per_conversation ?? 0, icon: <BranchesOutlined />, color: '#f59e0b' },
+          { title: 'Identified Users', value: stats?.identified_users ?? 0, icon: <UserOutlined />, color: '#10b981' },
+          { title: 'Avg Turns/Conv', value: stats ? Math.ceil((stats.avg_messages_per_conversation ?? 0) / 2) : 0, icon: <BranchesOutlined />, color: '#f59e0b' },
           { title: 'Routing Decisions', value: stats?.total_routing_decisions ?? 0, icon: <RocketOutlined />, color: '#ec4899' },
           { title: 'Last 24h', value: stats?.recent_24h ?? 0, icon: <ClockCircleOutlined />, color: '#06b6d4' },
-          { title: 'Distillation Samples', value: distSamples, icon: <ExperimentOutlined />, color: '#f59e0b' },
+          { title: 'Claude Samples', value: distSamples, icon: <ExperimentOutlined />, color: '#f59e0b' },
           { title: 'Active Sessions', value: sessions.length, icon: <SafetyCertificateOutlined />, color: '#10b981' },
         ].map((s) => (
           <Col key={s.title} xs={12} sm={6} md={3}>
@@ -227,7 +270,13 @@ export default function Conversations() {
           }>
             {view === 'sessions' ? (
               sessions.length > 0 ? (
-                <Table columns={sessionColumns} dataSource={sessions} rowKey="id" size="small" pagination={false} />
+                <Table
+                  columns={sessionColumns}
+                  dataSource={sessions}
+                  rowKey="id"
+                  size="small"
+                  pagination={{ pageSize: 10, showSizeChanger: false, showTotal: (t) => `${t} sessions` }}
+                />
               ) : (
                 <div style={{ textAlign: 'center', padding: 24 }}>
                   <SafetyCertificateOutlined style={{ fontSize: 28, color: '#4b5563', marginBottom: 8 }} />
@@ -235,22 +284,39 @@ export default function Conversations() {
                 </div>
               )
             ) : (
-              <div style={{ fontSize: 12, color: '#9ca3af' }}>
-                <Row gutter={16}>
-                  {Object.entries(stats?.sources || {}).map(([src, count]) => {
-                    const cfg = SOURCE_CONFIG[src] || { label: src, color: 'default', icon: <BranchesOutlined /> };
+              /* Recent conversations preview — replaces the redundant source breakdown cards */
+              <div>
+                <Typography.Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 8 }}>Recent activity</Typography.Text>
+                {data.slice(0, 5).length > 0 ? (
+                  data.slice(0, 5).map((c) => {
+                    const cfg = SOURCE_CONFIG[c.source] || { label: c.source, color: 'default', icon: <BranchesOutlined /> };
                     return (
-                      <Col key={src} span={8}>
-                        <Card size="small" style={{ marginBottom: 8 }}>
-                          <Space>
-                            <Tag icon={cfg.icon} color={cfg.color}>{cfg.label}</Tag>
-                            <Typography.Text strong>{count as number}</Typography.Text>
-                          </Space>
-                        </Card>
-                      </Col>
+                      <div
+                        key={c.id}
+                        onClick={() => navigate(`/conversations/${c.id}`)}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 8, padding: '5px 4px',
+                          cursor: 'pointer', borderRadius: 4, marginBottom: 4,
+                          borderBottom: '1px solid rgba(255,255,255,0.05)',
+                        }}
+                      >
+                        <Tag icon={cfg.icon} color={cfg.color} style={{ fontSize: 10, margin: 0, flexShrink: 0 }}>{cfg.label}</Tag>
+                        <span style={{ fontSize: 11, color: '#9ca3af', fontFamily: 'monospace', flexShrink: 0 }}>{c.id.slice(0, 8)}</span>
+                        <span style={{ fontSize: 11, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {c.user_id || <span style={{ color: '#4b5563' }}>anonymous</span>}
+                        </span>
+                        {c.model && (
+                          <Tag color="purple" style={{ fontSize: 9, margin: 0, flexShrink: 0 }}>
+                            <RobotOutlined /> {c.model}
+                          </Tag>
+                        )}
+                        <span style={{ fontSize: 10, color: '#6b7280', flexShrink: 0 }}>{dayjs(c.created_at).fromNow()}</span>
+                      </div>
                     );
-                  })}
-                </Row>
+                  })
+                ) : (
+                  <Typography.Text type="secondary" style={{ fontSize: 11 }}>No conversations yet</Typography.Text>
+                )}
               </div>
             )}
           </Card>
@@ -259,7 +325,24 @@ export default function Conversations() {
 
       {/* Filters */}
       <Space style={{ marginBottom: 10 }} wrap>
-        <Search placeholder="Search conversations..." allowClear prefix={<SearchOutlined />} onSearch={setSearch} style={{ width: 280 }} size="small" />
+        <Search
+          placeholder="Search by user ID..."
+          allowClear
+          prefix={<SearchOutlined />}
+          onSearch={(v) => setSearch(v)}
+          onChange={(e) => { if (!e.target.value) setSearch(''); }}
+          style={{ width: 260 }}
+          size="small"
+        />
+        <Select
+          placeholder="All sources"
+          allowClear
+          size="small"
+          style={{ width: 150 }}
+          value={sourceFilter}
+          onChange={setSourceFilter}
+          options={Object.entries(SOURCE_CONFIG).map(([k, v]) => ({ value: k, label: v.label }))}
+        />
         <DateRangeFilter value={dateRange} onChange={setDateRange} />
       </Space>
 
