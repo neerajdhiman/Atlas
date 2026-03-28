@@ -33,9 +33,22 @@ The Vite proxy config in `dashboard-ui/vite.config.ts` must match the backend po
 
 ### Database Migrations
 ```bash
-alembic upgrade head                          # apply all
-alembic revision --autogenerate -m "message"  # new migration
+alembic upgrade head                          # apply all pending migrations
+alembic downgrade base                        # roll back everything (dev only)
+alembic revision --autogenerate -m "message"  # generate a new migration from model diff
+alembic history                               # show migration chain
+alembic current                               # show current DB revision
 ```
+
+**Migration chain:** `0000_initial_schema` → `0001_add_max_local_pct` → …
+
+**Adding a new migration:**
+1. Edit `src/a1/db/models.py` to add/change columns.
+2. Run `alembic revision --autogenerate -m "describe_the_change"`.
+3. Review the generated file in `alembic/versions/` — autogenerate is not always perfect.
+4. Run `alembic upgrade head` to apply.
+
+**Production note:** Never use `create_all` directly against a prod DB. Always go through migrations.
 
 ## Architecture
 
