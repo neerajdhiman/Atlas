@@ -93,6 +93,20 @@ async def handle_dual_execution(
     original_model = request.model
     request.model = claude_model
 
+    # Inject domain-specific system prompt suffix for the Atlas model
+    from a1.providers.claude_cli import get_atlas_system_suffix
+    domain_suffix = get_atlas_system_suffix(original_model)
+    if domain_suffix:
+        from a1.proxy.request_models import MessageInput
+        sys_idx = next((i for i, m in enumerate(request.messages) if m.role == "system"), None)
+        if sys_idx is not None:
+            existing = request.messages[sys_idx].content or ""
+            request.messages[sys_idx] = MessageInput(
+                role="system", content=f"{existing}\n\n{domain_suffix}".strip()
+            )
+        else:
+            request.messages.insert(0, MessageInput(role="system", content=domain_suffix))
+
     # Execute Claude request
     try:
         result = await claude_provider.complete(request)
@@ -204,13 +218,62 @@ async def handle_dual_execution_stream(
         return None
 
     claude_model = settings.distillation_claude_model
+    original_model = request.model
     request.model = claude_model
 
+    # Inject domain-specific system prompt suffix for the Atlas model
+    from a1.providers.claude_cli import get_atlas_system_suffix
+    domain_suffix = get_atlas_system_suffix(original_model)
+    if domain_suffix:
+        from a1.proxy.request_models import MessageInput
+        sys_idx = next((i for i, m in enumerate(request.messages) if m.role == "system"), None)
+        if sys_idx is not None:
+            existing = request.messages[sys_idx].content or ""
+            request.messages[sys_idx] = MessageInput(
+                role="system", content=f"{existing}\n\n{domain_suffix}".strip()
+            )
+        else:
+            request.messages.insert(0, MessageInput(role="system", content=domain_suffix))
+
+    # Capture post-mask messages and timing before streaming begins (fix 2.5/2.6).
+    # request.messages are already PII-masked by the router at this point.
+    messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
+    start_time = time.time()
+
     try:
-        return claude_provider.stream(request)
+        raw_iter = claude_provider.stream(request)
     except Exception as e:
         log.error(f"Claude stream failed: {e}")
         return None
+
+    async def _wrapped_stream():
+        """Yield chunks live; fire background training task after stream ends (fix 2.6)."""
+        full_text = ""
+        prompt_tokens = 0
+        completion_tokens = 0
+        try:
+            async for chunk in raw_iter:
+                if chunk.choices:
+                    delta_text = chunk.choices[0].delta.content or ""
+                    full_text += delta_text
+                if chunk.usage:
+                    prompt_tokens = chunk.usage.prompt_tokens
+                    completion_tokens = chunk.usage.completion_tokens
+                yield chunk
+        finally:
+            latency_ms = int((time.time() - start_time) * 1000)
+            if full_text:
+                asyncio.create_task(_background_local_comparison(
+                    messages_dicts=messages_dicts,
+                    claude_response_text=full_text,
+                    claude_model=claude_model,
+                    task_type=task_type,
+                    claude_latency_ms=latency_ms,
+                    claude_prompt_tokens=prompt_tokens,
+                    claude_completion_tokens=completion_tokens,
+                ))
+
+    return _wrapped_stream()
 
 
 async def _background_local_comparison(
@@ -283,7 +346,7 @@ async def _background_local_comparison(
                         local_prompt_tokens=local_prompt_tokens if local_text else None,
                         local_completion_tokens=local_completion_tokens if local_text else None,
                         similarity_score=similarity if local_text else None,
-                        quality_score=1.0,  # Claude response is always high quality
+                        quality_score=similarity if local_text else None,  # derived from Jaccard (fix 2.7)
                     )
 
                     # Increment sample count
@@ -306,32 +369,76 @@ async def _background_local_comparison(
         log.error(f"Background local comparison error: {e}")
 
 
+_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "it", "in", "on", "at", "to", "of", "and", "or",
+    "for", "with", "this", "that", "was", "be", "are", "i", "you", "we", "he",
+    "she", "they", "as", "by", "from", "but", "not", "so", "if", "do", "did",
+    "has", "have", "had", "can", "will", "would", "could", "should", "may",
+    "might", "its", "their", "our", "your", "his", "her", "my", "what", "how",
+    "when", "where", "which", "who", "all", "more", "also", "just", "than",
+    "then", "there", "these", "those", "been", "into", "out", "up", "about",
+})
+
+
+def _lcs_length(words_a: list[str], words_b: list[str]) -> int:
+    """Compute Longest Common Subsequence length between two word lists."""
+    m, n = len(words_a), len(words_b)
+    prev = [0] * (n + 1)
+    for i in range(1, m + 1):
+        curr = [0] * (n + 1)
+        for j in range(1, n + 1):
+            if words_a[i - 1] == words_b[j - 1]:
+                curr[j] = prev[j - 1] + 1
+            else:
+                curr[j] = max(curr[j - 1], prev[j])
+        prev = curr
+    return prev[n]
+
+
+def _rouge_l(words_a: list[str], words_b: list[str]) -> float:
+    """ROUGE-L F1 score using LCS at word level."""
+    if not words_a or not words_b:
+        return 0.0
+    lcs = _lcs_length(words_a, words_b)
+    precision = lcs / len(words_b)
+    recall = lcs / len(words_a)
+    denom = precision + recall
+    return (2 * precision * recall / denom) if denom > 0 else 0.0
+
+
 def _compute_similarity(text_a: str, text_b: str) -> float:
     """Compute semantic similarity between two texts.
 
-    Uses simple word overlap (Jaccard) as a fast approximation.
-    Can be upgraded to sentence-transformers embeddings later.
+    Combines stopword-filtered Jaccard (bag-of-words overlap) with ROUGE-L
+    (order-aware LCS recall). More accurate than plain Jaccard — less inflated
+    by stopwords, captures phrasing order for distillation quality scoring.
     """
     if not text_a or not text_b:
         return 0.0
 
-    # Normalize
-    words_a = set(text_a.lower().split())
-    words_b = set(text_b.lower().split())
+    # Stopword-filtered word lists (cap at 500 words each for LCS performance)
+    raw_a = text_a.lower().split()[:500]
+    raw_b = text_b.lower().split()[:500]
+    filtered_a = [w for w in raw_a if w not in _STOPWORDS]
+    filtered_b = [w for w in raw_b if w not in _STOPWORDS]
 
-    if not words_a or not words_b:
-        return 0.0
+    # Filtered Jaccard
+    set_a = set(filtered_a)
+    set_b = set(filtered_b)
+    if set_a and set_b:
+        inter = set_a & set_b
+        union = set_a | set_b
+        jaccard = len(inter) / len(union)
+    else:
+        jaccard = 0.0
 
-    # Jaccard similarity
-    intersection = words_a & words_b
-    union = words_a | words_b
-    jaccard = len(intersection) / len(union) if union else 0.0
+    # ROUGE-L on filtered word lists
+    rouge = _rouge_l(filtered_a, filtered_b)
 
-    # Also check length ratio (penalize very different lengths)
+    # Length ratio (penalize very different response lengths)
     len_ratio = min(len(text_a), len(text_b)) / max(len(text_a), len(text_b))
 
-    # Combined score
-    return round(jaccard * 0.6 + len_ratio * 0.4, 3)
+    return round(0.4 * jaccard + 0.4 * rouge + 0.2 * len_ratio, 3)
 
 
 async def _check_and_trigger_training(session: AsyncSession, task_type: str, sample_count: int):
@@ -358,6 +465,15 @@ async def _check_and_trigger_training(session: AsyncSession, task_type: str, sam
 
     # Trigger training!
     log.info(f"Auto-triggering training for task_type={task_type} ({sample_count} samples)")
+
+    # Mark the records being included in this training batch (fix 2.7)
+    from a1.db.repositories import DualExecutionRepo
+    dual_repo = DualExecutionRepo(session)
+    training_records = await dual_repo.get_unused_for_training(task_type, limit=sample_count)
+    for rec in training_records:
+        rec.used_for_training = True
+    log.info(f"Marked {len(training_records)} records as used_for_training for {task_type}")
+
     config = {
         "base_model": settings.training_base_model,
         "lora_rank": settings.training_lora_rank,
@@ -381,7 +497,14 @@ async def _check_and_trigger_training(session: AsyncSession, task_type: str, sam
 
 
 async def update_handoff_after_training(task_type: str, eval_results: dict):
-    """After a training run completes, update the handoff percentage."""
+    """After a training run completes, update the handoff percentage.
+
+    If Argilla handoff gate is enabled, the increment is not applied immediately.
+    Instead, the current sample batch is pushed to Argilla for human annotation,
+    the task_type_readiness row is marked as `pending_argilla_review`, and the
+    handoff % is left unchanged until `check_and_apply_argilla_approvals` confirms
+    that >= argilla_approval_threshold fraction of annotated records are rated ≥4/5.
+    """
     try:
         from a1.db.engine import async_session
         from a1.db.repositories import TaskTypeReadinessRepo
@@ -395,7 +518,24 @@ async def update_handoff_after_training(task_type: str, eval_results: dict):
                 readiness = await repo.get_or_create(task_type)
 
                 if improved and improvement > 0.02:  # >2% improvement
-                    # Use per-task cap from DB; fall back to global setting if not set
+                    # --- Argilla quality gate ---
+                    if settings.argilla_handoff_gate_enabled and settings.argilla_api_url:
+                        # Don't increment yet — queue for human review
+                        from a1.feedback.argilla_sync import push_handoff_batch_for_review
+                        batch_id = await push_handoff_batch_for_review(session, task_type)
+                        readiness.argilla_review_status = "pending_argilla_review"
+                        readiness.argilla_batch_id = batch_id
+                        readiness.local_avg_quality = eval_results.get("avg_finetuned_loss", 0.0)
+                        log.info(
+                            f"Handoff for {task_type} pending Argilla review: batch_id={batch_id} "
+                            f"(improvement: {improvement:.1%})"
+                        )
+                        # Store pending increment magnitude so we can apply it after approval
+                        # We encode it in readiness but don't touch local_handoff_pct
+                        _handoff_cache[task_type] = readiness.local_handoff_pct  # unchanged
+                        return
+
+                    # Gate disabled — apply increment directly
                     cap = getattr(readiness, "max_local_pct", None) or settings.distillation_max_handoff_pct
                     new_pct = min(
                         readiness.local_handoff_pct + settings.distillation_handoff_increment,
@@ -419,3 +559,60 @@ async def update_handoff_after_training(task_type: str, eval_results: dict):
 
     except Exception as e:
         log.error(f"Failed to update handoff: {e}")
+
+
+async def check_and_apply_argilla_approvals():
+    """Scan all task_type_readiness rows in `pending_argilla_review` state and apply
+    handoff increments for batches that have reached the annotation approval threshold.
+
+    Intended to be called periodically (e.g. from an ARQ scheduled job or admin endpoint).
+    """
+    try:
+        from a1.db.engine import async_session
+        from a1.db.repositories import TaskTypeReadinessRepo
+        from a1.feedback.argilla_sync import check_handoff_batch_approval
+
+        async with async_session() as session:
+            async with session.begin():
+                repo = TaskTypeReadinessRepo(session)
+                all_readiness = await repo.list_all()
+
+                for readiness in all_readiness:
+                    if readiness.argilla_review_status != "pending_argilla_review":
+                        continue
+                    if not readiness.argilla_batch_id:
+                        continue
+
+                    result = await check_handoff_batch_approval(readiness.argilla_batch_id)
+
+                    if result["pending"]:
+                        log.info(
+                            f"Argilla review pending for {readiness.task_type}: "
+                            f"{result['annotated_count']}/{result['total_records']} annotated so far"
+                        )
+                        continue
+
+                    if result["approved"]:
+                        cap = getattr(readiness, "max_local_pct", None) or settings.distillation_max_handoff_pct
+                        old_pct = readiness.local_handoff_pct
+                        new_pct = min(old_pct + settings.distillation_handoff_increment, cap)
+                        readiness.local_handoff_pct = new_pct
+                        readiness.argilla_review_status = "approved"
+                        _handoff_cache[readiness.task_type] = new_pct
+                        log.info(
+                            f"Argilla approved handoff increment for {readiness.task_type}: "
+                            f"{old_pct:.0%} → {new_pct:.0%} "
+                            f"({result['positive_pct']:.0%} positive, "
+                            f"{result['annotated_count']} annotations)"
+                        )
+                    else:
+                        readiness.argilla_review_status = "rejected"
+                        log.warning(
+                            f"Argilla rejected handoff increment for {readiness.task_type}: "
+                            f"{result['positive_pct']:.0%} positive "
+                            f"(threshold {settings.argilla_approval_threshold:.0%}), "
+                            f"{result['annotated_count']} annotations"
+                        )
+
+    except Exception as e:
+        log.error(f"Failed during Argilla approval check: {e}")

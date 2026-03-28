@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     argilla_api_url: str = ""
     argilla_api_key: str = ""
     argilla_workspace: str = "default"
+    argilla_handoff_gate_enabled: bool = True  # require Argilla annotation approval before handoff increment
+    argilla_approval_threshold: float = 0.8    # fraction of annotated records rated ≥4/5 required for approval
 
     # lm-evaluation-harness
     use_harness_eval: bool = False

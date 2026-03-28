@@ -300,6 +300,10 @@ class TaskTypeReadiness(Base):
     best_local_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_training_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    argilla_review_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Values: None (no pending review), "pending_argilla_review", "approved", "rejected"
+    argilla_batch_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Argilla dataset name for the pending or last-completed review batch
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
