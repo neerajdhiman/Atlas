@@ -40,19 +40,52 @@ _ATLAS_BASE_IDENTITY = (
 )
 
 
-def _get_external_provider():
-    """Return the best available external provider for Atlas requests.
+# P1-5: Per-Atlas-model external provider preference order.
+# First healthy registered provider in the list wins.
+_ATLAS_PROVIDER_PREFERENCE: dict[str, list[str]] = {
+    "atlas-plan":   ["groq", "anthropic", "claude-cli", "openai"],
+    "atlas-code":   ["groq", "anthropic", "claude-cli", "openai"],
+    "atlas-secure": ["anthropic", "claude-cli", "groq", "openai"],
+    "atlas-infra":  ["anthropic", "claude-cli", "groq", "openai"],
+    "atlas-data":   ["openai", "groq", "anthropic", "claude-cli"],
+    "atlas-books":  ["openai", "groq", "anthropic", "claude-cli"],
+    "atlas-audit":  ["openai", "anthropic", "claude-cli", "groq"],
+}
 
-    Priority: anthropic (direct SDK) > claude-cli (subprocess).
-    Returns (provider, provider_name) or (None, None).
+# Default model to use for each provider when serving Atlas requests.
+# None means fall back to settings.distillation_claude_model.
+_PROVIDER_DEFAULT_MODELS: dict[str, str | None] = {
+    "groq":       "llama-3.3-70b-versatile",   # <200ms TTFT target
+    "anthropic":  "claude-sonnet-4-20250514",
+    "claude-cli": None,                         # uses distillation_claude_model setting
+    "openai":     "gpt-4o-mini",
+}
+
+
+def _get_external_provider(atlas_model: str = ""):
+    """Return (provider, provider_name, model) for the given Atlas model.
+
+    Walks the per-atlas-model provider preference list and returns the first
+    healthy, registered provider. Falls back to anthropic → claude-cli if
+    no atlas_model-specific preference matches.
+    Returns (None, None, None) if nothing is available.
     """
-    p = provider_registry.get_provider("anthropic")
-    if p:
-        return p, "anthropic"
-    p = provider_registry.get_provider("claude-cli")
-    if p:
-        return p, "claude-cli"
-    return None, None
+    preference = _ATLAS_PROVIDER_PREFERENCE.get(
+        atlas_model,
+        ["anthropic", "claude-cli", "groq", "openai"],
+    )
+    for provider_name in preference:
+        p = provider_registry.get_provider(provider_name)
+        if p and provider_registry.is_healthy(provider_name):
+            model = _PROVIDER_DEFAULT_MODELS.get(provider_name) or settings.distillation_claude_model
+            return p, provider_name, model
+    # Final fallback: accept any registered provider even if health unknown
+    for provider_name in ["anthropic", "claude-cli"]:
+        p = provider_registry.get_provider(provider_name)
+        if p:
+            model = _PROVIDER_DEFAULT_MODELS.get(provider_name) or settings.distillation_claude_model
+            return p, provider_name, model
+    return None, None, None
 
 
 def _inject_atlas_identity(request, atlas_model: str) -> None:
@@ -158,20 +191,21 @@ async def handle_dual_execution(
     response: Response,
     task_type: str,
     confidence: float,
+    atlas_model: str = "",
 ) -> ChatCompletionResponse:
-    """Send request to external provider (Anthropic SDK preferred), return response,
+    """Send request to best external provider for this atlas_model, return response,
     fire local Ollama comparison concurrently via asyncio.create_task.
 
-    Provider priority: anthropic (direct SDK) > claude-cli (subprocess).
+    Provider selection is per-atlas-model (P1-5): atlas-plan/code → Groq,
+    atlas-secure/infra → Anthropic, atlas-data/books/audit → OpenAI.
     """
     start_time = time.time()
 
-    external_provider, provider_name = _get_external_provider()
+    external_provider, provider_name, external_model = _get_external_provider(atlas_model)
     if not external_provider:
         log.warning("No external provider available, falling back to auto-routing")
         return None
 
-    external_model = settings.distillation_claude_model
     original_model = request.model
     request.model = external_model
 
@@ -284,18 +318,17 @@ async def handle_dual_execution_stream(
     request: ChatCompletionRequest,
     task_type: str,
     confidence: float,
+    atlas_model: str = "",
 ):
-    """Stream response from best external provider, fire local comparison in parallel.
+    """Stream response from best external provider for this atlas_model.
 
-    Provider priority: anthropic (direct SDK) > claude-cli (subprocess).
-    Returns an async chunk iterator for true token-by-token streaming.
-    Returns None if no external provider is available.
+    Provider selection is per-atlas-model (P1-5). Fires local Ollama
+    comparison concurrently. Returns async chunk iterator or None.
     """
-    external_provider, provider_name = _get_external_provider()
+    external_provider, provider_name, external_model = _get_external_provider(atlas_model)
     if not external_provider:
         return None
 
-    external_model = settings.distillation_claude_model
     original_model = request.model
     request.model = external_model
 

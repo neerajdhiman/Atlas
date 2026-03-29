@@ -118,14 +118,6 @@ async def atlas_endpoint(
     if not messages:
         messages.append(MessageInput(role="user", content="Hello"))
 
-    # --- PII Masking (for external providers only) ---
-    mask_map = {}
-    if settings.pii_masking_enabled:
-        from a1.security.pii_masker import pii_masker
-        messages_dicts = [{"role": m.role, "content": m.content or ""} for m in messages]
-        masked_dicts, mask_map = pii_masker.mask_messages(messages_dicts)
-        messages = [MessageInput(role=d["role"], content=d["content"]) for d in masked_dicts]
-
     model = LEGACY_ALIASES.get(model, model)
 
     # Resolve Atlas model (4.2: use LLM fallback when confidence < 0.70)
@@ -139,6 +131,31 @@ async def atlas_endpoint(
 
     log.info(f"[atlas] {atlas_model} (task={task_type})")
 
+    # P1-7: Snapshot pre-PII messages as cache key (non-streaming only).
+    # Cache check happens after atlas_model/task_type are known but before masking,
+    # so the key uses original user content for maximum hit rate.
+    cache_key_messages = None
+    if not stream and settings.task_cache_enabled:
+        from a1.proxy.cache import task_cache
+        cache_key_messages = [{"role": m.role, "content": m.content or ""} for m in messages]
+        cached_text = task_cache.get(atlas_model, cache_key_messages)
+        if cached_text:
+            log.info(f"[atlas] cache HIT for {atlas_model} task={task_type}")
+            resp_id = f"resp_{uuid.uuid4().hex[:12]}"
+            meta = {"provider": "cache", "is_local": False, "task_type": task_type,
+                    "atlas_model": atlas_model, "cache_hit": True}
+            return await _return_response_or_stream(False, resp_id, atlas_model, cached_text, {}, meta)
+
+    # P1-6: PII masking via thread executor (non-blocking — regex scan runs in thread pool).
+    mask_map = {}
+    if settings.pii_masking_enabled:
+        from a1.security.pii_masker import pii_masker
+        messages_dicts = [{"role": m.role, "content": m.content or ""} for m in messages]
+        masked_dicts, mask_map = await asyncio.to_thread(
+            pii_masker.mask_messages, messages_dicts
+        )
+        messages = [MessageInput(role=d["role"], content=d["content"]) for d in masked_dicts]
+
     # Route through distillation (Claude) or local
     if settings.distillation_enabled:
         resp_id = f"resp_{uuid.uuid4().hex[:12]}"
@@ -146,17 +163,18 @@ async def atlas_endpoint(
             model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature
         )
 
+        # P1-5: provider selection is per-atlas-model
         from a1.training.auto_trainer import _get_external_provider
-        _, ext_provider_name = _get_external_provider()
+        _, ext_provider_name, _ = _get_external_provider(atlas_model)
         ext_provider_name = ext_provider_name or "external"
 
         # TRUE STREAMING: pipe provider tokens directly to client
         if stream:
             from a1.training.auto_trainer import handle_dual_execution_stream
-            chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9)
+            chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9, atlas_model=atlas_model)
             if chunk_iter is None:
                 log.warning("[atlas] Stream distillation failed, retrying")
-                chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9)
+                chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9, atlas_model=atlas_model)
             if chunk_iter is not None:
                 meta = {"provider": ext_provider_name, "is_local": False, "task_type": task_type,
                         "atlas_model": atlas_model, "distillation": True,
@@ -167,16 +185,21 @@ async def atlas_endpoint(
 
         # NON-STREAMING: wait for full response (retry once on failure)
         from a1.training.auto_trainer import handle_dual_execution
-        dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9)
+        dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9, atlas_model=atlas_model)
         if dual_result is None:
             log.warning(f"[atlas] Distillation failed for {atlas_model}, retrying once")
-            dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9)
+            dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9, atlas_model=atlas_model)
         if dual_result is not None:
             assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
 
             if mask_map:
                 from a1.security.pii_masker import pii_masker
                 assistant_text = pii_masker.unmask(assistant_text, mask_map)
+
+            # P1-7: Store in task cache for subsequent identical requests
+            if cache_key_messages and assistant_text:
+                from a1.proxy.cache import task_cache
+                task_cache.put(atlas_model, cache_key_messages, assistant_text, task_type)
 
             if session:
                 user_input = input_data if isinstance(input_data, str) else str(input_data)

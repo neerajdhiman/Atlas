@@ -111,6 +111,7 @@ class Settings(BaseSettings):
     # Phase 1: performance
     parallel_dual_execution: bool = True          # fire local model concurrently with external
     session_load_grace_ms: int = 100              # max ms to wait for session before proceeding
+    task_cache_enabled: bool = True               # per-task-type in-memory response cache (P1-7)
 
     # Multi-model management
     warm_up_models: list[str] = []
