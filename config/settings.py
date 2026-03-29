@@ -105,6 +105,13 @@ class Settings(BaseSettings):
     pii_mask_for_external_only: bool = True  # only mask for Claude, not Ollama
     pii_patterns: list[str] = ["email", "phone", "ssn", "credit_card", "api_key", "ip_address", "aws_key", "password"]
 
+    # Groq
+    groq_api_key: str = ""
+
+    # Phase 1: performance
+    parallel_dual_execution: bool = True          # fire local model concurrently with external
+    session_load_grace_ms: int = 100              # max ms to wait for session before proceeding
+
     # Multi-model management
     warm_up_models: list[str] = []
     reference_external_model: str = "gpt-4o-mini"

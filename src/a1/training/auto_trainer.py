@@ -31,6 +31,91 @@ from config.settings import settings
 
 log = get_logger("auto_trainer")
 
+# Atlas base identity injected into all external provider calls.
+# ClaudeCLIProvider injects this internally; all other providers get it here.
+_ATLAS_BASE_IDENTITY = (
+    "You are Atlas, an AI assistant by Alpheric.AI. "
+    "Never identify as Claude, Anthropic, or any other AI. "
+    "You are Atlas and your responses represent the Alpheric.AI platform."
+)
+
+
+def _get_external_provider():
+    """Return the best available external provider for Atlas requests.
+
+    Priority: anthropic (direct SDK) > claude-cli (subprocess).
+    Returns (provider, provider_name) or (None, None).
+    """
+    p = provider_registry.get_provider("anthropic")
+    if p:
+        return p, "anthropic"
+    p = provider_registry.get_provider("claude-cli")
+    if p:
+        return p, "claude-cli"
+    return None, None
+
+
+def _inject_atlas_identity(request, atlas_model: str) -> None:
+    """Inject Atlas base identity + domain suffix into request messages (in-place).
+
+    This must be called before sending to any external provider that does not
+    internally embed the Atlas persona (i.e. everything except ClaudeCLIProvider).
+    """
+    from a1.providers.claude_cli import get_atlas_system_suffix
+    from a1.proxy.request_models import MessageInput
+
+    domain_suffix = get_atlas_system_suffix(atlas_model)
+    parts = [_ATLAS_BASE_IDENTITY]
+    if domain_suffix:
+        parts.append(domain_suffix)
+    atlas_system = "\n\n".join(parts)
+
+    sys_idx = next((i for i, m in enumerate(request.messages) if m.role == "system"), None)
+    if sys_idx is not None:
+        existing = request.messages[sys_idx].content or ""
+        request.messages[sys_idx] = MessageInput(
+            role="system",
+            content=f"{atlas_system}\n\n{existing}".strip() if existing else atlas_system,
+        )
+    else:
+        request.messages.insert(0, MessageInput(role="system", content=atlas_system))
+
+
+async def _run_local_model(task_type: str, messages_dicts: list[dict]) -> dict:
+    """Run the best local Ollama model for a task type and return result dict.
+
+    Used for parallel dual execution — started as a background task before
+    the external provider call so both run concurrently.
+    """
+    from a1.routing.strategy import select_model
+    from a1.proxy.request_models import ChatCompletionRequest, MessageInput
+
+    local_model_name, local_provider_name = await select_model(task_type, "best_quality")
+    local_provider = provider_registry.get_provider(local_provider_name)
+
+    if not local_provider or local_provider_name != "ollama":
+        return {"text": None, "latency_ms": 0, "prompt_tokens": 0, "completion_tokens": 0, "model": None}
+
+    local_messages = [
+        MessageInput(role=m["role"], content=m.get("content", ""))
+        for m in messages_dicts
+    ]
+    local_req = ChatCompletionRequest(model=local_model_name, messages=local_messages, max_tokens=1000)
+    start = time.time()
+    try:
+        local_result = await local_provider.complete(local_req)
+        return {
+            "text": local_result.choices[0].message.content if local_result.choices else "",
+            "latency_ms": int((time.time() - start) * 1000),
+            "prompt_tokens": local_result.usage.prompt_tokens,
+            "completion_tokens": local_result.usage.completion_tokens,
+            "model": local_model_name,
+        }
+    except Exception as e:
+        log.warning(f"Local model run failed for {local_model_name}: {e}")
+        return {"text": None, "latency_ms": int((time.time() - start) * 1000), "prompt_tokens": 0, "completion_tokens": 0, "model": local_model_name}
+
+
 # In-memory cache of handoff percentages (refreshed from DB periodically)
 _handoff_cache: dict[str, float] = {}
 _handoff_cache_ts: float = 0.0
@@ -74,90 +159,82 @@ async def handle_dual_execution(
     task_type: str,
     confidence: float,
 ) -> ChatCompletionResponse:
-    """Send request to Claude Opus, return response, fire background local comparison.
+    """Send request to external provider (Anthropic SDK preferred), return response,
+    fire local Ollama comparison concurrently via asyncio.create_task.
 
-    This is the main entry point called from the proxy router when
-    an Atlas model is requested and distillation is enabled.
+    Provider priority: anthropic (direct SDK) > claude-cli (subprocess).
     """
     start_time = time.time()
 
-    # Get Claude CLI provider
-    claude_provider = provider_registry.get_provider("claude-cli")
-    if not claude_provider:
-        # Fallback to any healthy provider if Claude CLI not available
-        log.warning("Claude CLI not available, falling back to auto-routing")
-        return None  # Signal to router to use normal auto-routing
+    external_provider, provider_name = _get_external_provider()
+    if not external_provider:
+        log.warning("No external provider available, falling back to auto-routing")
+        return None
 
-    # Set model to Claude Opus
-    claude_model = settings.distillation_claude_model
+    external_model = settings.distillation_claude_model
     original_model = request.model
-    request.model = claude_model
+    request.model = external_model
 
-    # Inject domain-specific system prompt suffix for the Atlas model
-    from a1.providers.claude_cli import get_atlas_system_suffix
-    domain_suffix = get_atlas_system_suffix(original_model)
-    if domain_suffix:
-        from a1.proxy.request_models import MessageInput
-        sys_idx = next((i for i, m in enumerate(request.messages) if m.role == "system"), None)
-        if sys_idx is not None:
-            existing = request.messages[sys_idx].content or ""
-            request.messages[sys_idx] = MessageInput(
-                role="system", content=f"{existing}\n\n{domain_suffix}".strip()
-            )
-        else:
-            request.messages.insert(0, MessageInput(role="system", content=domain_suffix))
+    # Inject Atlas identity + domain suffix (claude-cli does this internally,
+    # all other providers need explicit injection)
+    if provider_name != "claude-cli":
+        _inject_atlas_identity(request, original_model)
 
-    # Execute Claude request
+    # Snapshot messages for training record BEFORE provider call modifies anything
+    messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
+
+    # P0: start local model concurrently if parallel execution is enabled.
+    # User response time = external latency only (local runs in background).
+    local_task = None
+    if settings.parallel_dual_execution:
+        local_task = asyncio.create_task(_run_local_model(task_type, messages_dicts))
+
     try:
-        result = await claude_provider.complete(request)
+        result = await external_provider.complete(request)
     except Exception as e:
-        log.error(f"Claude execution failed: {e}, falling back to local")
+        log.error(f"External provider ({provider_name}) failed: {e}, falling back to auto-routing")
+        if local_task:
+            local_task.cancel()
         request.model = original_model
-        return None  # Signal to router to use normal auto-routing
+        return None
 
     latency_ms = int((time.time() - start_time) * 1000)
-    claude_text = result.choices[0].message.content if result.choices else ""
+    external_text = result.choices[0].message.content if result.choices else ""
 
-    # Set response metadata
-    result.provider = "claude-cli"
+    result.provider = provider_name
     result.task_type = task_type
     result.routing_strategy = "distillation"
 
-    # Set response headers
-    response.headers["X-A1-Provider"] = "claude-cli"
-    response.headers["X-A1-Model"] = claude_model
+    response.headers["X-A1-Provider"] = provider_name
+    response.headers["X-A1-Model"] = external_model
     response.headers["X-A1-Is-Local"] = "false"
     response.headers["X-A1-Distillation"] = "teacher"
     response.headers["X-A1-Tokens-In"] = str(result.usage.prompt_tokens)
     response.headers["X-A1-Tokens-Out"] = str(result.usage.completion_tokens)
 
-    # Record metrics
-    cost = claude_provider.estimate_cost(
-        result.usage.prompt_tokens, result.usage.completion_tokens, claude_model
+    cost = external_provider.estimate_cost(
+        result.usage.prompt_tokens, result.usage.completion_tokens, external_model
     )
     metrics.record_request(
-        "claude-cli", claude_model, task_type, latency_ms, cost,
+        provider_name, external_model, task_type, latency_ms, cost,
         result.usage.prompt_tokens, result.usage.completion_tokens, is_local=False,
     )
 
-    # Persist usage record
     try:
         from a1.db.engine import async_session as _usage_session
         from a1.db.models import UsageRecord
         async with _usage_session() as session:
             async with session.begin():
-                record = UsageRecord(
-                    provider="claude-cli", model=claude_model, is_local=False,
+                session.add(UsageRecord(
+                    provider=provider_name, model=external_model, is_local=False,
                     prompt_tokens=result.usage.prompt_tokens,
                     completion_tokens=result.usage.completion_tokens,
                     cost_usd=cost, equivalent_external_cost_usd=0,
                     latency_ms=latency_ms, error=False, cache_hit=False,
-                )
-                session.add(record)
+                ))
     except Exception as e:
         log.warning(f"Failed to persist usage: {e}")
 
-    # Persist conversation to DB (so it shows on dashboard)
     try:
         from a1.db.engine import async_session as _async_session
         from a1.db.repositories import ConversationRepo, MessageRepo, RoutingRepo
@@ -166,17 +243,16 @@ async def handle_dual_execution(
                 conv_repo = ConversationRepo(db_session)
                 msg_repo = MessageRepo(db_session)
                 routing_repo = RoutingRepo(db_session)
-
                 conv = await conv_repo.create(source="distillation", user_id=None)
                 seq = 0
                 for m in request.messages:
-                    if m.role != "system":  # don't store huge system prompts
+                    if m.role != "system":
                         await msg_repo.add(conv.id, m.role, (m.content or "")[:500], seq)
                         seq += 1
-                assistant_msg = await msg_repo.add(conv.id, "assistant", claude_text[:2000], seq)
+                assistant_msg = await msg_repo.add(conv.id, "assistant", external_text[:2000], seq)
                 await routing_repo.record(
                     message_id=assistant_msg.id,
-                    provider="claude-cli", model=claude_model, strategy="distillation",
+                    provider=provider_name, model=external_model, strategy="distillation",
                     task_type=task_type, confidence=confidence,
                     latency_ms=latency_ms,
                     prompt_tokens=result.usage.prompt_tokens,
@@ -186,19 +262,20 @@ async def handle_dual_execution(
     except Exception as e:
         log.warning(f"Failed to persist distillation conversation: {e}")
 
-    # Fire background: local model comparison + training data collection
-    messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
+    # Background: compare external vs local and collect training data.
+    # local_task is already running in parallel (started above); pass it through
+    # so _background_local_comparison awaits it instead of re-running local model.
     asyncio.create_task(_background_local_comparison(
         messages_dicts=messages_dicts,
-        claude_response_text=claude_text,
-        claude_model=claude_model,
+        claude_response_text=external_text,
+        claude_model=external_model,
         task_type=task_type,
         claude_latency_ms=latency_ms,
         claude_prompt_tokens=result.usage.prompt_tokens,
         claude_completion_tokens=result.usage.completion_tokens,
+        local_task=local_task,
     ))
 
-    # Restore original model name for display
     request.model = original_model
     return result
 
@@ -208,46 +285,41 @@ async def handle_dual_execution_stream(
     task_type: str,
     confidence: float,
 ):
-    """Stream response from Claude CLI, fire background comparison.
+    """Stream response from best external provider, fire local comparison in parallel.
 
+    Provider priority: anthropic (direct SDK) > claude-cli (subprocess).
     Returns an async chunk iterator for true token-by-token streaming.
-    Returns None if Claude is unavailable.
+    Returns None if no external provider is available.
     """
-    claude_provider = provider_registry.get_provider("claude-cli")
-    if not claude_provider:
+    external_provider, provider_name = _get_external_provider()
+    if not external_provider:
         return None
 
-    claude_model = settings.distillation_claude_model
+    external_model = settings.distillation_claude_model
     original_model = request.model
-    request.model = claude_model
+    request.model = external_model
 
-    # Inject domain-specific system prompt suffix for the Atlas model
-    from a1.providers.claude_cli import get_atlas_system_suffix
-    domain_suffix = get_atlas_system_suffix(original_model)
-    if domain_suffix:
-        from a1.proxy.request_models import MessageInput
-        sys_idx = next((i for i, m in enumerate(request.messages) if m.role == "system"), None)
-        if sys_idx is not None:
-            existing = request.messages[sys_idx].content or ""
-            request.messages[sys_idx] = MessageInput(
-                role="system", content=f"{existing}\n\n{domain_suffix}".strip()
-            )
-        else:
-            request.messages.insert(0, MessageInput(role="system", content=domain_suffix))
+    if provider_name != "claude-cli":
+        _inject_atlas_identity(request, original_model)
 
-    # Capture post-mask messages and timing before streaming begins (fix 2.5/2.6).
-    # request.messages are already PII-masked by the router at this point.
     messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
     start_time = time.time()
 
+    # P0: fire local model concurrently before stream starts
+    local_task = None
+    if settings.parallel_dual_execution:
+        local_task = asyncio.create_task(_run_local_model(task_type, messages_dicts))
+
     try:
-        raw_iter = claude_provider.stream(request)
+        raw_iter = external_provider.stream(request)
     except Exception as e:
-        log.error(f"Claude stream failed: {e}")
+        log.error(f"External provider stream ({provider_name}) failed: {e}")
+        if local_task:
+            local_task.cancel()
         return None
 
     async def _wrapped_stream():
-        """Yield chunks live; fire background training task after stream ends (fix 2.6)."""
+        """Yield chunks live; fire background training task after stream ends."""
         full_text = ""
         prompt_tokens = 0
         completion_tokens = 0
@@ -266,11 +338,12 @@ async def handle_dual_execution_stream(
                 asyncio.create_task(_background_local_comparison(
                     messages_dicts=messages_dicts,
                     claude_response_text=full_text,
-                    claude_model=claude_model,
+                    claude_model=external_model,
                     task_type=task_type,
                     claude_latency_ms=latency_ms,
                     claude_prompt_tokens=prompt_tokens,
                     claude_completion_tokens=completion_tokens,
+                    local_task=local_task,
                 ))
 
     return _wrapped_stream()
@@ -284,40 +357,56 @@ async def _background_local_comparison(
     claude_latency_ms: int,
     claude_prompt_tokens: int,
     claude_completion_tokens: int,
+    local_task=None,
 ):
-    """Background task: run local model on same request, compare, store, maybe train."""
+    """Background task: compare external vs local response, store, maybe train.
+
+    If local_task is provided (parallel execution mode), awaits that already-running
+    coroutine instead of launching a new local model call.
+    """
     try:
-        from a1.proxy.request_models import ChatCompletionRequest, MessageInput
-        from a1.routing.strategy import select_model
-
-        # Select best local model for this task type
-        local_model_name, local_provider_name = await select_model(task_type, "best_quality")
-        local_provider = provider_registry.get_provider(local_provider_name)
-
         local_text = None
         local_latency = 0
         local_prompt_tokens = 0
         local_completion_tokens = 0
+        local_model_name = None
 
-        if local_provider and local_provider_name == "ollama":
-            # Build request for local model
-            local_messages = [MessageInput(role=m["role"], content=m.get("content", "")) for m in messages_dicts]
-            local_req = ChatCompletionRequest(
-                model=local_model_name,
-                messages=local_messages,
-                max_tokens=1000,
-            )
-
-            start = time.time()
+        if local_task is not None:
+            # Parallel mode: local model was started before external call
             try:
-                local_result = await local_provider.complete(local_req)
-                local_latency = int((time.time() - start) * 1000)
-                local_text = local_result.choices[0].message.content if local_result.choices else ""
-                local_prompt_tokens = local_result.usage.prompt_tokens
-                local_completion_tokens = local_result.usage.completion_tokens
+                res = await local_task
+                local_text = res.get("text")
+                local_latency = res.get("latency_ms", 0)
+                local_prompt_tokens = res.get("prompt_tokens", 0)
+                local_completion_tokens = res.get("completion_tokens", 0)
+                local_model_name = res.get("model")
             except Exception as e:
-                log.warning(f"Local comparison failed for {local_model_name}: {e}")
-                local_latency = int((time.time() - start) * 1000)
+                log.warning(f"Parallel local task failed: {e}")
+        else:
+            # Sequential fallback: run local model now
+            from a1.proxy.request_models import ChatCompletionRequest, MessageInput
+            from a1.routing.strategy import select_model
+
+            local_model_name, local_provider_name = await select_model(task_type, "best_quality")
+            local_provider = provider_registry.get_provider(local_provider_name)
+
+            if local_provider and local_provider_name == "ollama":
+                local_messages = [MessageInput(role=m["role"], content=m.get("content", "")) for m in messages_dicts]
+                local_req = ChatCompletionRequest(
+                    model=local_model_name,
+                    messages=local_messages,
+                    max_tokens=1000,
+                )
+                start = time.time()
+                try:
+                    local_result = await local_provider.complete(local_req)
+                    local_latency = int((time.time() - start) * 1000)
+                    local_text = local_result.choices[0].message.content if local_result.choices else ""
+                    local_prompt_tokens = local_result.usage.prompt_tokens
+                    local_completion_tokens = local_result.usage.completion_tokens
+                except Exception as e:
+                    log.warning(f"Local comparison failed for {local_model_name}: {e}")
+                    local_latency = int((time.time() - start) * 1000)
 
         # Compute similarity
         similarity = 0.0

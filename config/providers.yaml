@@ -38,6 +38,23 @@ providers:
         supports_tools: true
         supports_streaming: true
 
+  # --- Groq (ultra-fast inference, <200ms TTFT) ---
+  groq:
+    enabled: true
+    models:
+      - name: llama-3.3-70b-versatile
+        context_window: 128000
+        cost_per_1k_input: 0.00006
+        cost_per_1k_output: 0.00006
+        supports_tools: true
+        supports_streaming: true
+      - name: llama-3.1-8b-instant
+        context_window: 128000
+        cost_per_1k_input: 0.00005
+        cost_per_1k_output: 0.00008
+        supports_tools: true
+        supports_streaming: true
+
   vertex:
     enabled: false
     models:
@@ -83,6 +100,11 @@ providers:
         task_types: [chat, general]
         description: "Planning, discussion, brainstorming"
         local_fallback: llama3.2:latest
+        system_prompt_suffix: >
+          You excel at strategic planning, collaborative discussion, and structured
+          brainstorming. Break complex problems into clear phases. When proposing plans,
+          use numbered steps with concise rationale. Prefer actionable outputs over
+          abstract frameworks.
       - name: atlas-code
         context_window: 128000
         cost_per_1k_input: 0.0
@@ -92,6 +114,11 @@ providers:
         task_types: [code, structured_extraction]
         description: "Code generation, debugging, review"
         local_fallback: deepseek-coder-v2:16b
+        system_prompt_suffix: >
+          You are an expert software engineer. Apply clean-code principles, SOLID design,
+          and language-specific idioms. For debugging: identify root cause before fixing.
+          For code review: flag security issues, performance bottlenecks, and maintainability
+          concerns. Produce well-commented, production-ready code.
       - name: atlas-secure
         context_window: 128000
         cost_per_1k_input: 0.0
@@ -101,6 +128,11 @@ providers:
         task_types: [analysis, math]
         description: "Security analysis, reasoning, auditing"
         local_fallback: deepseek-r1:8b
+        system_prompt_suffix: >
+          You are a cybersecurity expert fluent in MITRE ATT&CK, CVSS scoring, OWASP Top 10,
+          and threat modeling (STRIDE, PASTA). Map findings to ATT&CK tactics and techniques
+          where applicable. Prioritize by exploitability and business impact. Recommend
+          mitigations aligned with NIST CSF and CIS Controls.
       - name: atlas-infra
         context_window: 128000
         cost_per_1k_input: 0.0
@@ -110,6 +142,11 @@ providers:
         task_types: [code]
         description: "Infrastructure, DevOps, deployment"
         local_fallback: codellama:13b
+        system_prompt_suffix: >
+          You are a senior DevOps and platform engineer. Apply infrastructure-as-code best
+          practices for Terraform, Kubernetes, Docker, and CI/CD pipelines. Prioritize
+          idempotency, observability, and least-privilege IAM. Flag single points of failure
+          and suggest high-availability patterns. Prefer declarative over imperative config.
       - name: atlas-data
         context_window: 128000
         cost_per_1k_input: 0.0
@@ -119,6 +156,11 @@ providers:
         task_types: [analysis, summarization, math]
         description: "Data analysis, statistics, ETL"
         local_fallback: mistral:7b
+        system_prompt_suffix: >
+          You are a data scientist and analytics engineer. Apply statistical rigor: state
+          assumptions, validate distributions, and flag confounding variables. For ETL tasks,
+          emphasize data quality checks, schema evolution, and idempotent pipelines. Present
+          findings with appropriate uncertainty bounds and visualisation suggestions.
       - name: atlas-books
         context_window: 128000
         cost_per_1k_input: 0.0
@@ -128,6 +170,11 @@ providers:
         task_types: [creative, summarization, translation]
         description: "Documentation, writing, research"
         local_fallback: llama3.2:latest
+        system_prompt_suffix: >
+          You are an expert technical writer and researcher. Produce clear, audience-aware
+          prose — adjust tone and vocabulary to the reader's expertise level. For documentation:
+          follow docs-as-code conventions (Diátaxis framework: tutorials, how-tos, reference,
+          explanation). For summaries: preserve key claims, caveats, and source attribution.
       - name: atlas-audit
         context_window: 128000
         cost_per_1k_input: 0.0
@@ -137,3 +184,9 @@ providers:
         task_types: [structured_extraction, analysis]
         description: "Compliance auditing, log analysis, structured extraction"
         local_fallback: deepseek-coder:6.7b
+        system_prompt_suffix: >
+          You are a compliance and audit specialist. Apply regulatory frameworks including
+          SOC 2, ISO 27001, GDPR, HIPAA, and PCI-DSS. For log analysis: extract anomalies,
+          correlate events by timestamp and entity, and flag policy violations. For structured
+          extraction: output valid JSON or structured tables matching the requested schema.
+          Always cite the specific control or clause driving a finding.

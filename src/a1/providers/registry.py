@@ -129,12 +129,30 @@ class ProviderRegistry:
         """Register LiteLLM-backed providers (default)."""
         from a1.providers.litellm_provider import LiteLLMProvider
 
+        # Anthropic: always use native SDK (persistent connection pool, true token streaming)
+        if settings.anthropic_api_key:
+            from a1.providers.anthropic import AnthropicProvider
+            self._providers["anthropic"] = AnthropicProvider()
+            log.info("Registered Anthropic (native SDK)")
+
         if settings.openai_api_key:
             models = _load_provider_models("openai")
             self._providers["openai"] = LiteLLMProvider(
                 name="openai", models=models, api_key=settings.openai_api_key,
             )
             log.info(f"Registered OpenAI via LiteLLM ({len(models)} models)")
+
+        if settings.groq_api_key:
+            models = _load_provider_models("groq")
+            if not models:
+                models = [
+                    ModelInfo("llama-3.3-70b-versatile", "groq", 128000, 0.0001, 0.0001, True, True),
+                    ModelInfo("llama-3.1-8b-instant", "groq", 128000, 0.00005, 0.00005, True, True),
+                ]
+            self._providers["groq"] = LiteLLMProvider(
+                name="groq", models=models, api_key=settings.groq_api_key,
+            )
+            log.info(f"Registered Groq via LiteLLM ({len(models)} models)")
 
         if settings.vertex_project_id:
             models = _load_provider_models("vertex")

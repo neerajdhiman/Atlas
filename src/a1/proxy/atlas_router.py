@@ -1,5 +1,6 @@
 """Alpheric.AI Atlas endpoint: /atlas and /atlas/models."""
 
+import asyncio
 import time
 import uuid
 
@@ -53,7 +54,7 @@ async def atlas_endpoint(
     stream = request.get("stream", False)
     multi_agent = bool(request.get("multi_agent", False))
 
-    # --- Session Memory ---
+    # --- Session Memory (non-blocking with grace window) ---
     session_id = request.get("session_id")
     previous_response_id = request.get("previous_response_id")
 
@@ -61,12 +62,21 @@ async def atlas_endpoint(
     session_history = []
     if settings.session_enabled:
         from a1.session.manager import session_manager
-        session = await session_manager.get_or_create(
-            session_id=session_id,
-            previous_response_id=previous_response_id,
-            user_id=request.get("user"),
-        )
-        session_history = session.get_history(limit=settings.session_max_messages)
+        try:
+            session = await asyncio.wait_for(
+                session_manager.get_or_create(
+                    session_id=session_id,
+                    previous_response_id=previous_response_id,
+                    user_id=request.get("user"),
+                ),
+                timeout=settings.session_load_grace_ms / 1000.0,
+            )
+            session_history = session.get_history(limit=settings.session_max_messages)
+        except asyncio.TimeoutError:
+            log.warning(
+                f"Session load exceeded {settings.session_load_grace_ms}ms grace, "
+                "proceeding without history"
+            )
 
     # Build messages
     messages = []
@@ -136,7 +146,11 @@ async def atlas_endpoint(
             model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature
         )
 
-        # TRUE STREAMING: if stream=True, pipe Claude CLI tokens directly to client
+        from a1.training.auto_trainer import _get_external_provider
+        _, ext_provider_name = _get_external_provider()
+        ext_provider_name = ext_provider_name or "external"
+
+        # TRUE STREAMING: pipe provider tokens directly to client
         if stream:
             from a1.training.auto_trainer import handle_dual_execution_stream
             chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9)
@@ -144,7 +158,7 @@ async def atlas_endpoint(
                 log.warning("[atlas] Stream distillation failed, retrying")
                 chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9)
             if chunk_iter is not None:
-                meta = {"provider": "claude-cli", "is_local": False, "task_type": task_type,
+                meta = {"provider": ext_provider_name, "is_local": False, "task_type": task_type,
                         "atlas_model": atlas_model, "distillation": True,
                         "session_id": session.id if session else None}
                 return await _return_response_or_stream(
@@ -155,7 +169,7 @@ async def atlas_endpoint(
         from a1.training.auto_trainer import handle_dual_execution
         dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9)
         if dual_result is None:
-            log.warning(f"[atlas] Distillation failed for {atlas_model}, retrying Claude CLI once")
+            log.warning(f"[atlas] Distillation failed for {atlas_model}, retrying once")
             dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9)
         if dual_result is not None:
             assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
@@ -178,7 +192,8 @@ async def atlas_endpoint(
             usage = {"input_tokens": dual_result.usage.prompt_tokens,
                      "output_tokens": dual_result.usage.completion_tokens,
                      "total_tokens": dual_result.usage.total_tokens}
-            meta = {"provider": "claude-cli", "is_local": False, "task_type": task_type,
+            actual_provider = getattr(dual_result, "provider", ext_provider_name) or ext_provider_name
+            meta = {"provider": actual_provider, "is_local": False, "task_type": task_type,
                     "atlas_model": atlas_model, "distillation": True, "latency_ms": latency_ms,
                     "session_id": session.id if session else None,
                     "pii_masked": len(mask_map) > 0}
