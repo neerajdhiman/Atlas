@@ -70,23 +70,40 @@ async def overview(db: AsyncSession = Depends(get_db)):
     }
 
 
+def _conv_latest_routing(conv) -> tuple[str | None, str | None]:
+    """Return (model, task_type) from the latest assistant message with a routing decision."""
+    for msg in sorted(conv.messages or [], key=lambda m: m.sequence, reverse=True):
+        if msg.role == "assistant" and msg.routing_decision:
+            return msg.routing_decision.model, msg.routing_decision.task_type
+    return None, None
+
+
 # --- Conversations ---
 @router.get("/conversations")
 async def list_conversations(
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
+    search: str | None = Query(None),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    source: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     repo = ConversationRepo(db)
-    conversations = await repo.list_recent(limit=limit, offset=offset)
-    total = await repo.count()
+    conversations = await repo.list_recent(
+        limit=limit, offset=offset,
+        search=search, date_from=date_from, date_to=date_to, source=source,
+    )
+    total = await repo.count(search=search, date_from=date_from, date_to=date_to, source=source)
     return {
         "data": [
             {
                 "id": str(c.id),
                 "source": c.source,
                 "user_id": c.user_id,
-                "message_count": len(c.messages) if hasattr(c, "messages") and c.messages else 0,
+                "message_count": sum(1 for m in (c.messages or []) if m.role in ("user", "assistant")),
+                "model": _conv_latest_routing(c)[0],
+                "task_type": _conv_latest_routing(c)[1],
                 "created_at": c.created_at.isoformat() if c.created_at else None,
                 "metadata": c.metadata_,
             }
@@ -107,7 +124,10 @@ async def conversation_stats(db: AsyncSession = Depends(get_db)):
     total = await db.execute(sqlselect(sqlfunc.count(Conversation.id)))
     total_convs = total.scalar() or 0
 
-    total_msgs = await db.execute(sqlselect(sqlfunc.count(Message.id)))
+    total_msgs = await db.execute(
+        sqlselect(sqlfunc.count(Message.id))
+        .where(Message.role.in_(["user", "assistant"]))
+    )
     total_messages = total_msgs.scalar() or 0
 
     # Source breakdown
@@ -143,7 +163,7 @@ async def conversation_stats(db: AsyncSession = Depends(get_db)):
     return {
         "total_conversations": total_convs,
         "total_messages": total_messages,
-        "unique_users": unique_users,
+        "identified_users": unique_users,
         "avg_messages_per_conversation": round(avg_msgs, 1),
         "total_routing_decisions": total_decisions,
         "recent_24h": recent_24h,
@@ -158,12 +178,26 @@ async def get_conversation(conv_id: str, db: AsyncSession = Depends(get_db)):
     if not conv:
         raise HTTPException(404, "Conversation not found")
 
+    # Aggregate cost/token totals across all routing decisions
+    total_prompt_tokens = sum(
+        m.routing_decision.prompt_tokens or 0 for m in conv.messages if m.routing_decision
+    )
+    total_completion_tokens = sum(
+        m.routing_decision.completion_tokens or 0 for m in conv.messages if m.routing_decision
+    )
+    total_cost_usd = sum(
+        float(m.routing_decision.cost_usd) for m in conv.messages if m.routing_decision
+    )
+
     return {
         "id": str(conv.id),
         "source": conv.source,
         "user_id": conv.user_id,
         "metadata": conv.metadata_,
         "created_at": conv.created_at.isoformat() if conv.created_at else None,
+        "total_prompt_tokens": total_prompt_tokens,
+        "total_completion_tokens": total_completion_tokens,
+        "total_cost_usd": round(total_cost_usd, 6),
         "messages": [
             {
                 "id": str(m.id),
@@ -217,9 +251,17 @@ async def add_feedback(
 
 # --- Routing ---
 @router.get("/routing/decisions")
-async def routing_decisions(limit: int = Query(100, le=500), db: AsyncSession = Depends(get_db)):
+async def routing_decisions(
+    limit: int = Query(100, le=500),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    task_type: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
     repo = RoutingRepo(db)
-    decisions = await repo.list_recent(limit=limit)
+    decisions = await repo.list_recent(
+        limit=limit, date_from=date_from, date_to=date_to, task_type=task_type
+    )
     return {
         "data": [
             {
@@ -233,6 +275,7 @@ async def routing_decisions(limit: int = Query(100, le=500), db: AsyncSession = 
                 "cost_usd": float(d.cost_usd),
                 "prompt_tokens": d.prompt_tokens,
                 "completion_tokens": d.completion_tokens,
+                "is_local": d.is_local,
                 "error": d.error,
                 "created_at": d.created_at.isoformat() if d.created_at else None,
             }

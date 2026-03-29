@@ -26,6 +26,38 @@ from a1.common.tokens import count_tokens_for_model, count_messages_tokens_for_m
 
 log = get_logger("providers.claude_cli")
 
+# Cache of atlas-model-name → system_prompt_suffix loaded from providers.yaml
+_atlas_suffixes: dict[str, str] | None = None
+
+
+def get_atlas_system_suffix(atlas_model: str) -> str:
+    """Return the domain-specific system prompt suffix for an Atlas model.
+
+    Loads config/providers.yaml on first call and caches the result.
+    Returns empty string if model not found or YAML unavailable.
+    """
+    global _atlas_suffixes
+    if _atlas_suffixes is None:
+        _atlas_suffixes = {}
+        try:
+            import os
+            import yaml
+            config_path = os.path.join(
+                os.path.dirname(__file__), "..", "..", "..", "config", "providers.yaml"
+            )
+            config_path = os.path.normpath(config_path)
+            with open(config_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            for model_cfg in data.get("providers", {}).get("atlas", {}).get("models", []):
+                name = model_cfg.get("name", "")
+                suffix = model_cfg.get("system_prompt_suffix", "")
+                if name and suffix:
+                    _atlas_suffixes[name] = suffix.strip()
+        except Exception as e:
+            log.warning(f"Could not load atlas suffixes from providers.yaml: {e}")
+    return _atlas_suffixes.get(atlas_model, "")
+
+
 # Models available through Claude CLI (Max subscription)
 CLAUDE_CLI_MODELS = [
     ModelInfo(
@@ -99,39 +131,92 @@ class ClaudeCLIProvider(LLMProvider):
 
         Returns dict with: result (text), usage (tokens), duration_api_ms, cost
         """
-        # Use --no-auto-memory to prevent CLI from injecting CLAUDE.md context
-        args = ["-p", prompt, "--max-turns", "1", "--output-format", "json"]
+        args = [
+            "-p", prompt,
+            "--max-turns", "3",
+            "--output-format", "json",
+        ]
 
         # Prepend Atlas identity to system prompt
         atlas_identity = (
             "You are Atlas, an AI assistant by Alpheric.AI. "
             "Never identify as Claude, Anthropic, or any other AI. "
-            "You are Atlas and your responses represent the Alpheric.AI platform."
+            "You are Atlas and your responses represent "
+            "the Alpheric.AI platform."
         )
-        full_system = f"{atlas_identity}\n\n{system}" if system else atlas_identity
+        full_system = (
+            f"{atlas_identity}\n\n{system}" if system
+            else atlas_identity
+        )
         args.extend(["--system-prompt", full_system])
 
-        output, code = await self._exec(args, timeout=120)
+        # Log command length for debugging Windows arg limits
+        total_len = sum(len(a) for a in args)
+        if total_len > 7000:
+            log.warning(
+                f"Claude CLI args very long ({total_len} chars)"
+                f" — may hit Windows 8191 char limit"
+            )
 
-        if code != 0 and not output:
-            raise RuntimeError(f"Claude CLI failed with exit code {code}")
+        output, code, stderr = await self._exec(
+            args, timeout=120,
+        )
+
+        if code != 0:
+            log.error(
+                f"Claude CLI exit={code} "
+                f"stderr={stderr[:500] if stderr else 'empty'}"
+            )
+            if not output:
+                raise RuntimeError(
+                    f"Claude CLI exit code {code}: "
+                    f"{stderr[:300] if stderr else 'no output'}"
+                )
 
         # Parse JSON response for accurate token counts
         try:
             import json
             data = json.loads(output)
+
+            # Extract text — handle error_max_turns where
+            # result may be empty because Claude tried tool_use
+            text = data.get("result", "")
+            if not text and data.get("subtype") == "error_max_turns":
+                log.warning(
+                    "Claude hit max turns (tool_use), "
+                    "returning partial result"
+                )
+                text = (
+                    "I can help with that, but I don't have "
+                    "access to external tools. Let me answer "
+                    "based on my knowledge instead."
+                )
+
             return {
-                "text": data.get("result", output),
-                "input_tokens": data.get("usage", {}).get("input_tokens", 0),
-                "output_tokens": data.get("usage", {}).get("output_tokens", 0),
-                "cache_read_tokens": data.get("usage", {}).get("cache_read_input_tokens", 0),
+                "text": text or output,
+                "input_tokens": data.get(
+                    "usage", {},
+                ).get("input_tokens", 0),
+                "output_tokens": data.get(
+                    "usage", {},
+                ).get("output_tokens", 0),
+                "cache_read_tokens": data.get(
+                    "usage", {},
+                ).get("cache_read_input_tokens", 0),
                 "cost_usd": data.get("total_cost_usd", 0.0),
-                "api_duration_ms": data.get("duration_api_ms", 0),
+                "api_duration_ms": data.get(
+                    "duration_api_ms", 0,
+                ),
             }
         except (json.JSONDecodeError, KeyError):
-            # Fallback: treat output as plain text
-            return {"text": output, "input_tokens": 0, "output_tokens": 0,
-                    "cache_read_tokens": 0, "cost_usd": 0.0, "api_duration_ms": 0}
+            return {
+                "text": output,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cost_usd": 0.0,
+                "api_duration_ms": 0,
+            }
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
         # Build prompt from messages
@@ -203,22 +288,23 @@ class ClaudeCLIProvider(LLMProvider):
         # Force UTF-8 for emoji/unicode handling on Windows
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LANG": "en_US.UTF-8"}
 
-        # Start CLI in text streaming mode (tokens arrive as they're generated)
-        cmd = [self._cli_path, "-p", user_prompt, "--max-turns", "1", "--system-prompt", full_system]
-        if sys.platform == "win32":
-            proc = await asyncio.create_subprocess_shell(
-                " ".join(f'"{a}"' if " " in a else a for a in cmd),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
+        # Start CLI in text streaming mode (tokens arrive as they're generated).
+        # Use create_subprocess_exec (never shell) to prevent command injection
+        # from user-controlled content. On Windows, .cmd/.bat files require
+        # cmd.exe as the launcher — args are still passed as discrete list
+        # elements, never joined into a shell string.
+        cli = self._cli_path
+        base_cmd = [cli, "-p", user_prompt, "--max-turns", "1", "--system-prompt", full_system]
+        if sys.platform == "win32" and cli.lower().endswith((".cmd", ".bat")):
+            exec_cmd = ["cmd.exe", "/c"] + base_cmd
         else:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
+            exec_cmd = base_cmd
+        proc = await asyncio.create_subprocess_exec(
+            *exec_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
 
         yield ChatCompletionChunk(
             id=chunk_id, model=request.model,
@@ -259,35 +345,50 @@ class ClaudeCLIProvider(LLMProvider):
             ),
         )
 
-    async def _exec(self, args: list[str], timeout: float = 30) -> tuple[str, int]:
-        """Execute CLI command and return (stdout, returncode)."""
+    async def _exec(
+        self, args: list[str], timeout: float = 30,
+    ) -> tuple[str, int, str]:
+        """Execute CLI command and return (stdout, returncode, stderr)."""
         import os, sys
         cmd = [self._cli_path] + args
 
-        # Force UTF-8 encoding to handle emojis/unicode in Claude responses
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LANG": "en_US.UTF-8"}
+        # Force UTF-8 encoding to handle emojis/unicode
+        env = {
+            **os.environ,
+            "PYTHONIOENCODING": "utf-8",
+            "LANG": "en_US.UTF-8",
+        }
 
-        if sys.platform == "win32":
-            proc = await asyncio.create_subprocess_shell(
-                " ".join(f'"{a}"' if " " in a else a for a in cmd),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
+        # Use create_subprocess_exec (never shell) to prevent command injection.
+        # On Windows, .cmd/.bat files require cmd.exe as the launcher — args are
+        # still passed as discrete list elements, never joined into a shell string.
+        cli = cmd[0]
+        exec_args = cmd[1:]
+        if sys.platform == "win32" and cli.lower().endswith((".cmd", ".bat")):
+            exec_cmd = ["cmd.exe", "/c", cli] + exec_args
         else:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return stdout.decode("utf-8", errors="replace").strip(), proc.returncode or 0
+            exec_cmd = cmd
+        proc = await asyncio.create_subprocess_exec(
+            *exec_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout,
+        )
+        return (
+            stdout.decode("utf-8", errors="replace").strip(),
+            proc.returncode or 0,
+            stderr.decode("utf-8", errors="replace").strip(),
+        )
 
     async def health_check(self) -> bool:
         """Check if Claude CLI is available and authenticated."""
         try:
-            version, code = await self._exec(["--version"], timeout=10)
+            version, code, _ = await self._exec(
+                ["--version"], timeout=10,
+            )
             if version and code == 0:
                 self._healthy = True
                 log.info(f"Claude CLI healthy: {version}")

@@ -45,6 +45,20 @@ async def lifespan(app: FastAPI):
     try:
         from a1.providers.key_pool import key_pool
         await key_pool.load_accounts()
+        # HIGH-02: Refuse to start if provider accounts exist without an encryption key.
+        # Without it, encrypt_key() silently stores API keys in plaintext.
+        if key_pool.get_providers_with_accounts() and not settings.encryption_key:
+            from a1.common.logging import get_logger as _get_log
+            _get_log("startup").critical(
+                "A1_ENCRYPTION_KEY is not set but provider accounts exist in the database. "
+                "Provider API keys would be stored in plaintext — this is a critical security risk. "
+                "Generate a key with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\" "
+                "and set A1_ENCRYPTION_KEY in your .env file. Server is refusing to start."
+            )
+            import sys
+            sys.exit(1)
+    except SystemExit:
+        raise
     except Exception:
         pass  # key pool load fails gracefully without DB
 
@@ -74,6 +88,14 @@ async def lifespan(app: FastAPI):
         _startup_log.info("ARQ pool initialized — Redis reachable")
     except Exception as _e:
         _startup_log.warning(f"ARQ pool init failed (training dispatch unavailable): {_e}")
+
+    # Initialize Redis-backed session persistence (graceful fallback to in-memory)
+    if settings.redis_url:
+        from a1.session.manager import session_manager
+        await session_manager.init_redis(settings.redis_url)
+        _startup_log.info(
+            f"Session backend: {'Redis' if session_manager._redis else 'in-memory'}"
+        )
 
     # Warm up local Ollama models (background, non-blocking)
     if settings.warm_up_models:

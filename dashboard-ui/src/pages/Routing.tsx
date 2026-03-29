@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   Typography, Card, Table, Tag, Space, Row, Col, Statistic, Button,
-  Progress, Badge,
+  Progress, Badge, Select,
 } from 'antd';
 import {
   BranchesOutlined, ClockCircleOutlined, ThunderboltOutlined, DollarOutlined,
@@ -15,7 +15,7 @@ import {
 } from 'recharts';
 import {
   getRoutingDecisions, getModelLeaderboard,
-  getRecentRequests, getDistillationOverview, getOverview,
+  getDistillationOverview, getOverview,
 } from '../lib/api';
 import ExportDropdown from '../components/shared/ExportDropdown';
 import DateRangeFilter from '../components/shared/DateRangeFilter';
@@ -39,27 +39,28 @@ const ATLAS_INFO: Record<string, { icon: any; color: string; description: string
 export default function Routing() {
   const [decisions, setDecisions] = useState<any[]>([]);
   const [leaderboard, setLeaderboard] = useState<any[]>([]);
-  const [recentReqs, setRecentReqs] = useState<any[]>([]);
   const [distillation, setDistillation] = useState<any>(null);
   const [overview, setOverview] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [taskFilter] = useState<string | undefined>();
+  const [taskFilter, setTaskFilter] = useState<string | undefined>();
   const [dateRange, setDateRange] = useState<[string | null, string | null]>([null, null]);
-
 
   const load = () => {
     setLoading(true);
+    const routingParams: any = { limit: 200 };
+    if (dateRange[0]) routingParams.date_from = dateRange[0];
+    if (dateRange[1]) routingParams.date_to = dateRange[1];
+    if (taskFilter) routingParams.task_type = taskFilter;
+
     Promise.all([
-      getRoutingDecisions({ limit: 200 }),
+      getRoutingDecisions(routingParams),
       getModelLeaderboard().catch(() => ({ data: [] })),
-      getRecentRequests(50).catch(() => ({ data: [] })),
       getDistillationOverview().catch(() => null),
       getOverview().catch(() => null),
     ])
-      .then(([d, lb, rr, dist, ov]) => {
+      .then(([d, lb, dist, ov]) => {
         setDecisions(d.data || []);
         setLeaderboard(lb.data || []);
-        setRecentReqs(rr.data || []);
         setDistillation(dist);
         setOverview(ov);
       })
@@ -72,27 +73,27 @@ export default function Routing() {
 
   if (loading) return <PageSkeleton type="table" />;
 
-  const m = overview?.metrics;
-  const totalReqs = recentReqs.length || m?.request_count || 0;
-  const localReqs = recentReqs.filter((r: any) => r.is_local).length;
+  // KPIs derived from DB-backed decisions (survive server restarts)
+  const totalReqs = decisions.length || overview?.metrics?.request_count || 0;
+  const localReqs = decisions.filter((r: any) => r.is_local).length;
   const externalReqs = totalReqs - localReqs;
   const localPct = totalReqs > 0 ? Math.round((localReqs / totalReqs) * 100) : 0;
-  const avgLatency = totalReqs > 0 ? Math.round(recentReqs.reduce((s: number, r: any) => s + r.latency_ms, 0) / totalReqs) : 0;
-  const taskTypes = [...new Set(recentReqs.map((r: any) => r.task_type).filter(Boolean))];
-  const models = [...new Set(recentReqs.map((r: any) => r.model).filter(Boolean))];
-  const totalCost = recentReqs.reduce((s: number, r: any) => s + (r.cost_usd || 0), 0);
-  const totalTokens = recentReqs.reduce((s: number, r: any) => s + (r.prompt_tokens || 0) + (r.completion_tokens || 0), 0);
+  const avgLatency = totalReqs > 0 ? Math.round(decisions.reduce((s: number, r: any) => s + (r.latency_ms || 0), 0) / totalReqs) : 0;
+  const allTaskTypes = [...new Set(decisions.map((r: any) => r.task_type).filter(Boolean))];
+  const models = [...new Set(decisions.map((r: any) => r.model).filter(Boolean))];
+  const totalCost = decisions.reduce((s: number, r: any) => s + (r.cost_usd || 0), 0);
+  const totalTokens = decisions.reduce((s: number, r: any) => s + (r.prompt_tokens || 0) + (r.completion_tokens || 0), 0);
 
-  // Task type distribution for pie chart
-  const taskDist = recentReqs.reduce((acc: Record<string, number>, r: any) => {
+  // Task type distribution for pie chart (from DB decisions)
+  const taskDist = decisions.reduce((acc: Record<string, number>, r: any) => {
     const t = r.task_type || 'unknown';
     acc[t] = (acc[t] || 0) + 1;
     return acc;
   }, {});
   const taskPieData = Object.entries(taskDist).map(([name, value]) => ({ name, value }));
 
-  // Provider distribution
-  const provDist = recentReqs.reduce((acc: Record<string, number>, r: any) => {
+  // Provider distribution (from DB decisions)
+  const provDist = decisions.reduce((acc: Record<string, number>, r: any) => {
     acc[r.provider] = (acc[r.provider] || 0) + 1;
     return acc;
   }, {});
@@ -111,6 +112,15 @@ export default function Routing() {
           </Typography.Text>
         </div>
         <Space>
+          <Select
+            allowClear
+            placeholder="All task types"
+            style={{ width: 140 }}
+            size="small"
+            value={taskFilter}
+            onChange={(v) => setTaskFilter(v)}
+            options={allTaskTypes.map((t) => ({ label: t, value: t }))}
+          />
           <DateRangeFilter value={dateRange} onChange={setDateRange} />
           <Button icon={<ReloadOutlined />} onClick={load} size="small">Refresh</Button>
           <ExportDropdown data={decisions} filename="routing-decisions" />
@@ -127,7 +137,7 @@ export default function Routing() {
           { title: 'Total Cost', value: `$${totalCost.toFixed(4)}`, icon: <DollarOutlined />, color: totalCost > 0 ? '#f59e0b' : '#10b981' },
           { title: 'Total Tokens', value: totalTokens.toLocaleString(), icon: <DatabaseOutlined />, color: '#06b6d4' },
           { title: 'Models Active', value: models.length, icon: <RocketOutlined />, color: '#f59e0b' },
-          { title: 'Task Types', value: taskTypes.length, icon: <BranchesOutlined />, color: '#ec4899' },
+          { title: 'Task Types', value: allTaskTypes.length, icon: <BranchesOutlined />, color: '#ec4899' },
         ].map((s) => (
           <Col key={s.title} xs={12} sm={6} md={3}>
             <Card size="small" hoverable>

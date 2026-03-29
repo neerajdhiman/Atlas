@@ -37,19 +37,53 @@ class ConversationRepo:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def list_recent(self, limit: int = 50, offset: int = 0) -> list[Conversation]:
+    async def list_recent(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        source: str | None = None,
+    ) -> list[Conversation]:
+        from datetime import datetime as _dt
         stmt = (
             select(Conversation)
-            .options(selectinload(Conversation.messages))
+            .options(
+                selectinload(Conversation.messages).selectinload(Message.routing_decision)
+            )
             .order_by(Conversation.created_at.desc())
-            .limit(limit)
-            .offset(offset)
         )
+        if search:
+            stmt = stmt.where(Conversation.user_id.ilike(f"%{search}%"))
+        if source:
+            stmt = stmt.where(Conversation.source == source)
+        if date_from:
+            stmt = stmt.where(Conversation.created_at >= _dt.fromisoformat(date_from))
+        if date_to:
+            stmt = stmt.where(Conversation.created_at <= _dt.fromisoformat(date_to))
+        stmt = stmt.limit(limit).offset(offset)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-    async def count(self) -> int:
-        result = await self.session.execute(select(func.count(Conversation.id)))
+    async def count(
+        self,
+        search: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        source: str | None = None,
+    ) -> int:
+        from datetime import datetime as _dt
+        stmt = select(func.count(Conversation.id))
+        if search:
+            stmt = stmt.where(Conversation.user_id.ilike(f"%{search}%"))
+        if source:
+            stmt = stmt.where(Conversation.source == source)
+        if date_from:
+            stmt = stmt.where(Conversation.created_at >= _dt.fromisoformat(date_from))
+        if date_to:
+            stmt = stmt.where(Conversation.created_at <= _dt.fromisoformat(date_to))
+        result = await self.session.execute(stmt)
         return result.scalar_one()
 
 
@@ -84,8 +118,24 @@ class RoutingRepo:
         await self.session.flush()
         return decision
 
-    async def list_recent(self, limit: int = 100) -> list[RoutingDecision]:
-        stmt = select(RoutingDecision).order_by(RoutingDecision.created_at.desc()).limit(limit)
+    async def list_recent(
+        self,
+        limit: int = 100,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        task_type: str | None = None,
+    ) -> list[RoutingDecision]:
+        from datetime import datetime, timezone
+        stmt = select(RoutingDecision)
+        if date_from:
+            dt_from = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
+            stmt = stmt.where(RoutingDecision.created_at >= dt_from)
+        if date_to:
+            dt_to = datetime.fromisoformat(date_to.replace("Z", "+00:00"))
+            stmt = stmt.where(RoutingDecision.created_at <= dt_to)
+        if task_type:
+            stmt = stmt.where(RoutingDecision.task_type == task_type)
+        stmt = stmt.order_by(RoutingDecision.created_at.desc()).limit(limit)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 

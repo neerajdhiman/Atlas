@@ -202,7 +202,7 @@ async def _load_session(
         return None, messages
     from a1.session.manager import session_manager
     from a1.proxy.request_models import MessageInput
-    session = session_manager.get_or_create(
+    session = await session_manager.get_or_create(
         session_id=session_id,
         previous_response_id=previous_response_id,
         user_id=user_id,
