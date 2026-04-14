@@ -153,11 +153,15 @@ async def _return_response_or_stream(
             usage=usage,
             metadata=metadata,
         )
+    # session_key at top level — required by atlas-ai adapter for session continuity
+    # (atlas-ai reads body.session_key, not body.metadata.session_id)
+    _session_key = (metadata or {}).get("session_id", "") or ""
     return {
         "id": resp_id,
         "object": "response",
         "created_at": int(time.time()),
         "model": model,
+        "session_key": _session_key,
         "output": [
             {
                 "type": "message",
