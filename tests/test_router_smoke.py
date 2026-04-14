@@ -82,6 +82,9 @@ def client():
         mock_settings.distillation_enabled = False
         mock_settings.task_cache_enabled = False
         mock_settings.session_load_grace_ms = 100
+        mock_settings.distillation_task_repeat_threshold = 0
+        mock_settings.planning_max_depth = 3
+        mock_settings.planning_max_workers = 5
 
         from a1.app import create_app
 

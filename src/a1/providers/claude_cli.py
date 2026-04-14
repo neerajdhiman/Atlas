@@ -182,9 +182,10 @@ class ClaudeCLIProvider(LLMProvider):
         # tools and will waste turns trying to call them
         system = self._strip_tool_definitions(system)
 
-        # --tools "" disables ALL built-in tools (correct flag; --allowedTools is an allowlist, not a blocklist)
-        # --bare skips CLAUDE.md auto-discovery, auto-memory, hooks, and LSP — keeps responses clean
-        # --no-session-persistence stops Claude from saving sessions to disk between runs
+        # --tools "" disables ALL built-in tools
+        # (correct flag; --allowedTools is an allowlist, not a blocklist)
+        # --bare skips CLAUDE.md auto-discovery, auto-memory, hooks, LSP
+        # --no-session-persistence stops Claude from saving sessions
         args = [
             "-p",
             prompt,
@@ -204,7 +205,6 @@ class ClaudeCLIProvider(LLMProvider):
             "You are Atlas and your responses represent the Alpheric.AI platform. "
             "Respond with text only. Do not use any tools."
         )
-        full_system = f"{atlas_identity}\n\n{system}" if system else atlas_identity
 
         # Always use stdin to pipe the prompt — avoids Windows cmd.exe quoting issues
         # with special characters (Unicode arrows, brackets, newlines) in the prompt.
@@ -398,7 +398,6 @@ class ClaudeCLIProvider(LLMProvider):
             "and your responses represent the "
             "Alpheric.AI platform."
         )
-        full_system = f"{atlas_identity}\n\n{system_prompt}" if system_prompt else atlas_identity
 
         chunk_id = f"chatcmpl-cli-{uuid.uuid4().hex[:8]}"
         import os
