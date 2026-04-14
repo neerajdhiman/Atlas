@@ -1,109 +1,86 @@
-"""Alpheric.AI Atlas endpoint: /atlas and /atlas/models."""
+"""Alpheric.AI Atlas endpoint: /atlas and /atlas/models.
 
-import asyncio
-import time
+Thin adapter that parses Atlas-native request format, applies agent persona
+injection, normalizes into CorePipelineInput, delegates to CorePipeline,
+and formats the result as Responses API JSON.
+"""
+
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Response
 
 from a1.common.auth import verify_api_key
 from a1.common.logging import get_logger
-from a1.common.metrics import metrics
-from a1.providers.registry import provider_registry
-from a1.proxy.pipeline import (
-    LEGACY_ALIASES, _return_response_or_stream, execute_tool_loop, strip_think_tokens,
-)
-from a1.proxy.request_models import ChatCompletionRequest, MessageInput
-from a1.routing.atlas_models import ATLAS_TASK_ROUTING, resolve_atlas_model
-from a1.routing.classifier import classify_task, classify_task_with_fallback
-from a1.routing.strategy import select_model
-
-# deepseek-r1 model names — responses from these need <think> tokens stripped
-_DEEPSEEK_R1_MODELS = frozenset({"deepseek-r1:8b", "deepseek-r1:14b", "deepseek-r1:32b", "deepseek-r1:70b"})
+from a1.proxy.core_pipeline import CorePipelineInput, core_pipeline, request_id_var
+from a1.proxy.pipeline import _return_response_or_stream
+from a1.proxy.request_models import MessageInput
+from a1.routing.atlas_models import ATLAS_TASK_ROUTING
 from config.settings import settings
 
 log = get_logger("proxy.atlas")
 router = APIRouter()
 
 
-@router.post("/atlas")
-async def atlas_endpoint(
-    request: dict,
-    response: Response,
-    api_key: str = Depends(verify_api_key),
-):
-    """Alpheric.AI Atlas endpoint — auto-selects the right model.
+def _parse_atlas_input(request: dict) -> tuple[list[MessageInput], str, str]:
+    """Parse Atlas-native input format into messages list.
 
-    Accepts:
-      - model: (optional) specific atlas model, or omit for auto-selection
-      - input: string or message array
-      - instructions: system prompt
-      - max_output_tokens / temperature
-
-    If model is omitted or "atlas", the system classifies the input
-    and picks the best Atlas model automatically.
+    Returns (messages, raw_user_input, model).
     """
-    start_time = time.time()
-
     model = request.get("model", "atlas")
     input_data = request.get("input", "")
     instructions = request.get("instructions", "")
     tools = request.get("tools", [])
-    temperature = request.get("temperature")
-    max_tokens = request.get("max_output_tokens") or request.get("max_tokens", 1000)
-    stream = request.get("stream", False)
-    multi_agent = bool(request.get("multi_agent", False))
 
-    # --- Session Memory (non-blocking with grace window) ---
-    session_id = request.get("session_id")
-    previous_response_id = request.get("previous_response_id")
+    # Agent persona injection
+    agent_id = request.get("agent_id")
+    atlas_model_override = None
+    if agent_id:
+        from a1.agents.registry import agent_registry
 
-    session = None
-    session_history = []
-    if settings.session_enabled:
-        from a1.session.manager import session_manager
-        try:
-            session = await asyncio.wait_for(
-                session_manager.get_or_create(
-                    session_id=session_id,
-                    previous_response_id=previous_response_id,
-                    user_id=request.get("user"),
-                ),
-                timeout=settings.session_load_grace_ms / 1000.0,
-            )
-            session_history = session.get_history(limit=settings.session_max_messages)
-        except asyncio.TimeoutError:
-            log.warning(
-                f"Session load exceeded {settings.session_load_grace_ms}ms grace, "
-                "proceeding without history"
-            )
+        agent = agent_registry.get_by_id(agent_id)
+        # Workspace scoping: verify agent belongs to same workspace as request
+        # (workspace_id will be set when auth middleware provides it)
+        if agent and agent.status == "active":
+            atlas_model_override = agent.atlas_model
+            model = agent.atlas_model
+            persona_parts = []
+            if agent.system_prompt:
+                persona_parts.append(agent.system_prompt)
+            if instructions:
+                persona_parts.append(instructions)
+            instructions = "\n\n".join(persona_parts) if persona_parts else instructions
+            if agent.tools:
+                existing = {t.get("name", "") for t in tools if isinstance(t, dict)}
+                for tn in agent.tools:
+                    if tn not in existing:
+                        tools.append({"name": tn, "description": ""})
+            log.info(f"[atlas] Agent '{agent.name}' ({agent.atlas_model}) injected")
+        else:
+            log.warning(f"[atlas] agent_id={agent_id} not found or inactive")
 
     # Build messages
     messages = []
 
-    # Combine instructions + tools into system prompt
+    # System prompt from instructions + tools
     system_parts = []
     if instructions:
         system_parts.append(instructions)
     if tools:
-        tool_descriptions = []
-        for tool in tools:
-            name = tool.get("name", tool.get("function", {}).get("name", "unknown"))
-            desc = tool.get("description", tool.get("function", {}).get("description", ""))
-            tool_descriptions.append(f"- {name}: {desc}")
-        if tool_descriptions:
-            system_parts.append("\n\nAvailable tools:\n" + "\n".join(tool_descriptions))
-
+        tool_descs = []
+        for t in tools:
+            name = t.get("name", t.get("function", {}).get("name", "unknown"))
+            desc = t.get("description", t.get("function", {}).get("description", ""))
+            tool_descs.append(f"- {name}: {desc}")
+        if tool_descs:
+            system_parts.append("\n\nAvailable tools:\n" + "\n".join(tool_descs))
     if system_parts:
         messages.append(MessageInput(role="system", content="\n".join(system_parts)))
 
-    # Inject session history before current message
-    for hist_msg in session_history:
-        messages.append(MessageInput(role=hist_msg["role"], content=hist_msg["content"]))
-
-    # Current input
+    # User input
+    raw_user_input = ""
     if isinstance(input_data, str):
         messages.append(MessageInput(role="user", content=input_data))
+        raw_user_input = input_data
     elif isinstance(input_data, list):
         for msg in input_data:
             if isinstance(msg, dict):
@@ -112,213 +89,148 @@ async def atlas_endpoint(
                 if isinstance(content, list):
                     content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
                 messages.append(MessageInput(role=role, content=content))
+                if role == "user":
+                    raw_user_input = content
             elif isinstance(msg, str):
                 messages.append(MessageInput(role="user", content=msg))
+                raw_user_input = msg
 
     if not messages:
         messages.append(MessageInput(role="user", content="Hello"))
+        raw_user_input = "Hello"
 
-    model = LEGACY_ALIASES.get(model, model)
+    return messages, raw_user_input, model, atlas_model_override
 
-    # Resolve Atlas model (4.2: use LLM fallback when confidence < 0.70)
-    if model == "atlas" or model not in ATLAS_TASK_ROUTING:
-        temp_req = ChatCompletionRequest(model="auto", messages=messages, max_tokens=max_tokens)
-        task_type, confidence = await classify_task_with_fallback(temp_req)
-        atlas_model = resolve_atlas_model(task_type)
-    else:
-        atlas_model = model
-        task_type = ATLAS_TASK_ROUTING[model]["tasks"][0]
 
-    log.info(f"[atlas] {atlas_model} (task={task_type})")
+@router.post("/atlas")
+async def atlas_endpoint(
+    request: dict,
+    response: Response,
+    api_key: str = Depends(verify_api_key),
+):
+    """Alpheric.AI Atlas endpoint -- auto-selects the right model."""
+    rid = request_id_var.get("")
 
-    # P1-7: Snapshot pre-PII messages as cache key (non-streaming only).
-    # Cache check happens after atlas_model/task_type are known but before masking,
-    # so the key uses original user content for maximum hit rate.
-    cache_key_messages = None
-    if not stream and settings.task_cache_enabled:
-        from a1.proxy.cache import task_cache
-        cache_key_messages = [{"role": m.role, "content": m.content or ""} for m in messages]
-        cached_text = task_cache.get(atlas_model, cache_key_messages)
-        if cached_text:
-            log.info(f"[atlas] cache HIT for {atlas_model} task={task_type}")
-            resp_id = f"resp_{uuid.uuid4().hex[:12]}"
-            meta = {"provider": "cache", "is_local": False, "task_type": task_type,
-                    "atlas_model": atlas_model, "cache_hit": True}
-            return await _return_response_or_stream(False, resp_id, atlas_model, cached_text, {}, meta)
+    messages, raw_user_input, model, atlas_model_override = _parse_atlas_input(request)
 
-    # P1-6: PII masking via thread executor (non-blocking — regex scan runs in thread pool).
-    mask_map = {}
-    if settings.pii_masking_enabled:
-        from a1.security.pii_masker import pii_masker
-        messages_dicts = [{"role": m.role, "content": m.content or ""} for m in messages]
-        masked_dicts, mask_map = await asyncio.to_thread(
-            pii_masker.mask_messages, messages_dicts
-        )
-        messages = [MessageInput(role=d["role"], content=d["content"]) for d in masked_dicts]
-
-    # Route through distillation (Claude) or local
-    if settings.distillation_enabled:
-        resp_id = f"resp_{uuid.uuid4().hex[:12]}"
-        temp_req = ChatCompletionRequest(
-            model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature
-        )
-
-        # P1-5: provider selection is per-atlas-model
-        from a1.training.auto_trainer import _get_external_provider
-        _, ext_provider_name, _ = _get_external_provider(atlas_model)
-        ext_provider_name = ext_provider_name or "external"
-
-        # TRUE STREAMING: pipe provider tokens directly to client
-        if stream:
-            from a1.training.auto_trainer import handle_dual_execution_stream
-            chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9, atlas_model=atlas_model)
-            if chunk_iter is None:
-                log.warning("[atlas] Stream distillation failed, retrying")
-                chunk_iter = await handle_dual_execution_stream(temp_req, task_type, 0.9, atlas_model=atlas_model)
-            if chunk_iter is not None:
-                meta = {"provider": ext_provider_name, "is_local": False, "task_type": task_type,
-                        "atlas_model": atlas_model, "distillation": True,
-                        "session_id": session.id if session else None}
-                return await _return_response_or_stream(
-                    True, resp_id, atlas_model, None, {}, meta, chunk_iterator=chunk_iter,
-                )
-
-        # NON-STREAMING: wait for full response (retry once on failure)
-        from a1.training.auto_trainer import handle_dual_execution
-        dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9, atlas_model=atlas_model)
-        if dual_result is None:
-            log.warning(f"[atlas] Distillation failed for {atlas_model}, retrying once")
-            dual_result = await handle_dual_execution(temp_req, response, task_type, 0.9, atlas_model=atlas_model)
-        if dual_result is not None:
-            assistant_text = dual_result.choices[0].message.content if dual_result.choices else ""
-
-            if mask_map:
-                from a1.security.pii_masker import pii_masker
-                assistant_text = pii_masker.unmask(assistant_text, mask_map)
-
-            # P1-7: Store in task cache for subsequent identical requests
-            if cache_key_messages and assistant_text:
-                from a1.proxy.cache import task_cache
-                task_cache.put(atlas_model, cache_key_messages, assistant_text, task_type)
-
-            if session:
-                user_input = input_data if isinstance(input_data, str) else str(input_data)
-                session.add_message("user", user_input)
-                session.add_message("assistant", assistant_text)
-
-            latency_ms = int((time.time() - start_time) * 1000)
-
-            if session:
-                from a1.session.manager import session_manager
-                await session_manager.link_response(resp_id, session.id)
-
-            usage = {"input_tokens": dual_result.usage.prompt_tokens,
-                     "output_tokens": dual_result.usage.completion_tokens,
-                     "total_tokens": dual_result.usage.total_tokens}
-            actual_provider = getattr(dual_result, "provider", ext_provider_name) or ext_provider_name
-            meta = {"provider": actual_provider, "is_local": False, "task_type": task_type,
-                    "atlas_model": atlas_model, "distillation": True, "latency_ms": latency_ms,
-                    "session_id": session.id if session else None,
-                    "pii_masked": len(mask_map) > 0}
-            return await _return_response_or_stream(False, resp_id, atlas_model, assistant_text, usage, meta)
-
-    # Fallback: route to local model (Claude unavailable)
-    log.warning(f"[atlas] Claude unavailable for {atlas_model}, falling back to local Ollama")
-
-    # 4.4 — multi-agent path
-    if multi_agent:
-        from a1.proxy.orchestrator import run_multi_agent
-        input_str = input_data if isinstance(input_data, str) else str(input_data)
-        context_msgs = [m for m in messages if m.role != "user"]
-        orchestrated = await run_multi_agent(input_str, context_msgs, max_tokens, provider_registry)
-        if orchestrated:
-            resp_id = f"resp_{uuid.uuid4().hex[:12]}"
-            latency_ms = int((time.time() - start_time) * 1000)
-            meta = {
-                "provider": "orchestrator", "is_local": True, "task_type": task_type,
-                "atlas_model": atlas_model, "multi_agent": True, "latency_ms": latency_ms,
-            }
-            usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
-            return await _return_response_or_stream(stream, resp_id, atlas_model, orchestrated, usage, meta)
-        log.warning("[atlas] multi-agent orchestration produced no output, falling through to single-task")
-
-    temp_req = ChatCompletionRequest(
-        model="auto", messages=messages, max_tokens=max_tokens, temperature=temperature
+    inp = CorePipelineInput(
+        request_id=rid or f"resp_{uuid.uuid4().hex[:12]}",
+        source="atlas",
+        messages=messages,
+        raw_user_input=raw_user_input,
+        model=model,
+        atlas_model_override=atlas_model_override,
+        strategy="best_quality",
+        temperature=request.get("temperature"),
+        max_tokens=request.get("max_output_tokens") or request.get("max_tokens", 1000),
+        stream=request.get("stream", False),
+        session_id=request.get("session_id"),
+        previous_response_id=request.get("previous_response_id"),
+        user_id=request.get("user"),
+        use_llm_classifier=True,  # Atlas uses LLM fallback classifier
     )
-    task_type_f, _ = classify_task(temp_req)
-    model_name, provider_name = await select_model(task_type_f, "best_quality")
-    provider = provider_registry.get_provider(provider_name)
 
-    if not provider:
-        raise HTTPException(404, "No provider available")
+    result = await core_pipeline.execute(inp, response)
 
-    temp_req.model = model_name
-    try:
-        # 4.1 — use tool loop if tools are present, otherwise single call
-        if temp_req.tools:
-            result = await execute_tool_loop(provider, temp_req)
-        else:
-            result = await provider.complete(temp_req)
-    except Exception as e:
-        latency_ms = int((time.time() - start_time) * 1000)
+    # Set response headers
+    if result.atlas_model:
+        response.headers["X-Atlas-Model"] = result.atlas_model
+    response.headers["X-Atlas-Provider"] = result.provider_name or "unknown"
+
+    # Handle errors
+    if result.error and not result.assistant_text:
         return {
-            "id": f"resp_{uuid.uuid4().hex[:12]}",
-            "object": "response", "created_at": int(time.time()),
-            "model": atlas_model, "status": "completed",
-            "output": [{"type": "message", "id": f"msg_{uuid.uuid4().hex[:8]}",
-                        "role": "assistant", "content": [{"type": "output_text", "text": f"Error: {e}"}],
-                        "status": "completed"}],
-            "error": {"type": "provider_error", "message": str(e)},
+            "id": result.response_id,
+            "object": "response",
+            "status": "failed",
+            "error": {"type": result.error_type or "internal_error", "message": result.error},
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
         }
 
-    latency_ms = int((time.time() - start_time) * 1000)
-    assistant_text = result.choices[0].message.content if result.choices else ""
+    # Streaming
+    if result.chunk_iterator:
+        meta = {
+            "provider": result.provider_name,
+            "is_local": result.is_local,
+            "task_type": result.task_type,
+            "atlas_model": result.atlas_model,
+            "distillation": result.distillation,
+            "session_id": result.session_id,
+        }
+        return await _return_response_or_stream(
+            True,
+            result.response_id,
+            result.atlas_model or result.model_name,
+            None,
+            {},
+            meta,
+            chunk_iterator=result.chunk_iterator,
+        )
 
-    # 4.3 — strip <think> tokens from deepseek-r1 responses
-    if model_name in _DEEPSEEK_R1_MODELS:
-        assistant_text = strip_think_tokens(assistant_text)
-
-    is_local = provider_name == "ollama"
-    cost = provider.estimate_cost(
-        result.usage.prompt_tokens, result.usage.completion_tokens, model_name
-    ) if not is_local else 0.0
-
-    metrics.record_request(
-        provider_name, model_name, task_type, latency_ms, cost,
-        result.usage.prompt_tokens, result.usage.completion_tokens, is_local=is_local,
-    )
-
-    response.headers["X-Atlas-Model"] = atlas_model
-    response.headers["X-Atlas-Provider"] = provider_name
-
-    resp_id = f"resp_{uuid.uuid4().hex[:12]}"
-    usage = {"input_tokens": result.usage.prompt_tokens,
-             "output_tokens": result.usage.completion_tokens,
-             "total_tokens": result.usage.total_tokens}
-    meta = {
-        "provider": provider_name,
-        "actual_model": model_name,
-        "is_local": is_local,
-        "task_type": task_type,
-        "atlas_model": atlas_model,
-        "cost_usd": cost,
-        "latency_ms": latency_ms,
-        "fallback_to_local": True,
-        "warning": "Claude CLI unavailable, used local model",
+    # Non-streaming JSON response
+    usage = {
+        "input_tokens": result.prompt_tokens,
+        "output_tokens": result.completion_tokens,
+        "total_tokens": result.total_tokens,
     }
-    return await _return_response_or_stream(stream, resp_id, atlas_model, assistant_text, usage, meta)
+    meta = {
+        "provider": result.provider_name,
+        "is_local": result.is_local,
+        "task_type": result.task_type,
+        "atlas_model": result.atlas_model,
+        "distillation": result.distillation,
+        "latency_ms": result.latency_ms,
+        "session_id": result.session_id,
+        "pii_masked": result.pii_masked,
+    }
+    return await _return_response_or_stream(
+        False,
+        result.response_id,
+        result.atlas_model or result.model_name or inp.model,
+        result.assistant_text or "",
+        usage,
+        meta,
+    )
 
 
 @router.get("/atlas/models")
-async def atlas_models():
-    """List all Atlas models with their capabilities."""
+async def atlas_models(api_key: str = Depends(verify_api_key)):
+    """List all Atlas model family members."""
+    import yaml
+
+    try:
+        with open("config/providers.yaml") as f:
+            cfg = yaml.safe_load(f)
+        atlas_cfg = cfg.get("providers", {}).get("atlas", {}).get("models", [])
+    except Exception:
+        atlas_cfg = []
+
+    models = []
+    for m in atlas_cfg:
+        models.append(
+            {
+                "id": m.get("name"),
+                "tasks": m.get("task_types", []),
+                "description": m.get("description", ""),
+                "context_window": m.get("context_window", 128000),
+            }
+        )
+
+    if not models:
+        # Fallback to hardcoded list
+        for name, info in ATLAS_TASK_ROUTING.items():
+            models.append(
+                {
+                    "id": name,
+                    "tasks": info.get("tasks", []),
+                    "description": info.get("description", ""),
+                    "context_window": 128000,
+                }
+            )
+
     return {
         "object": "list",
         "family": "Atlas",
-        "product": "Alpheric.AI",
-        "models": [
-            {**v, "id": k, "context_window": 128000}
-            for k, v in ATLAS_TASK_ROUTING.items()
-        ],
+        "product": settings.app_name,
+        "models": models,
     }

@@ -2,7 +2,7 @@
 
 import random
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 
 from a1.common.logging import get_logger
 from a1.providers.registry import provider_registry
@@ -15,27 +15,13 @@ log = get_logger("routing.strategy")
 _LIVE_SCORER_MIN_SAMPLES = 20
 
 
-# Model -> provider mapping (derived from providers.yaml)
-MODEL_PROVIDER_MAP = {
-    "claude-sonnet-4-20250514": "anthropic",
-    "claude-haiku-4-5-20251001": "anthropic",
-    "gpt-4o": "openai",
-    "gpt-4o-mini": "openai",
-    "o3-mini": "openai",
-    "gemini-2.0-flash": "vertex",
-}
-
-
 def _get_provider_for(model: str) -> str:
-    """Resolve provider name for a model."""
-    if model in MODEL_PROVIDER_MAP:
-        return MODEL_PROVIDER_MAP[model]
-    # Check if any provider supports it (Ollama models like deepseek-coder:6.7b)
-    for name in ["ollama", "anthropic", "openai", "vertex"]:
-        provider = provider_registry.get_provider(name)
-        if provider and provider.supports_model(model):
-            return name
-    return "ollama"  # fallback to local
+    """Resolve provider name for a model via registry (single source of truth)."""
+    provider = provider_registry.get_provider_for_model(model)
+    if provider:
+        return provider.name
+    # Last resort: local
+    return "ollama"
 
 
 async def _build_candidates_from_db(task_type: str) -> list[ModelCandidate]:
@@ -118,7 +104,8 @@ async def select_model(task_type: str, strategy: str) -> tuple[str, str]:
         down_secs = provider_registry.get_unhealthy_duration(provider_name)
         if down_secs is not None and down_secs >= 300:
             log.critical(
-                f"Provider {provider_name} has been unhealthy for {down_secs:.0f}s — escalation required"
+                f"Provider {provider_name} has been unhealthy for "
+                f"{down_secs:.0f}s — escalation required"
             )
         log.warning(f"Provider {provider_name} unhealthy, trying fallbacks")
         seen_providers: set[str] = {provider_name}
@@ -131,8 +118,8 @@ async def select_model(task_type: str, strategy: str) -> tuple[str, str]:
                 return fb_model, fb_provider
 
         # Last resort: prefer fast English models
-        PREFERRED_FALLBACKS = ["llama3.2:latest", "mistral:7b", "deepseek-coder:6.7b"]
-        for pref in PREFERRED_FALLBACKS:
+        preferred_fallbacks = ["gemma4:12b", "llama3.2:latest", "mistral:7b", "deepseek-coder:6.7b"]
+        for pref in preferred_fallbacks:
             for name, provider in provider_registry.healthy_providers.items():
                 if provider.supports_model(pref):
                     return pref, name

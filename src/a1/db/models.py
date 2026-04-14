@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime
 
+from sqlalchemy import JSON as GenericJSON  # noqa: N811
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
@@ -13,21 +14,22 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy import JSON as GenericJSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.sql import func
 
+from a1.common.tz import now_ist as _now_ist
 from config.settings import settings
 
 # Use JSONB for PostgreSQL, JSON for SQLite
 if "sqlite" in settings.database_url:
-    from sqlalchemy import String as UUID_TYPE_BASE, TypeDecorator
     import uuid as _uuid_mod
+
+    from sqlalchemy import TypeDecorator
 
     JSONB = GenericJSON
 
     class SQLiteUUID(TypeDecorator):
         """UUID stored as string in SQLite, auto-converts UUID objects."""
+
         impl = String(36)
         cache_ok = True
 
@@ -41,7 +43,8 @@ if "sqlite" in settings.database_url:
                 return _uuid_mod.UUID(value) if not isinstance(value, _uuid_mod.UUID) else value
             return value
 
-    UUID = lambda as_uuid=True: SQLiteUUID()
+    def UUID(as_uuid=True):  # noqa: N802
+        return SQLiteUUID()
 else:
     from sqlalchemy.dialects.postgresql import JSONB, UUID
 
@@ -55,10 +58,13 @@ class Conversation(Base):
     external_id: Mapped[str | None] = mapped_column(String(512), unique=True, nullable=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False)  # proxy, import:paperclip, etc.
     user_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
+    )
     metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), default=_now_ist, onupdate=_now_ist
     )
 
     messages: Mapped[list["Message"]] = relationship(
@@ -82,7 +88,7 @@ class Message(Base):
     tool_calls: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
     routing_decision: Mapped["RoutingDecision | None"] = relationship(
@@ -115,9 +121,9 @@ class RoutingDecision(Base):
     api_key_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     cache_hit: Mapped[bool] = mapped_column(default=False)
     account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("provider_accounts.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("provider_accounts.id", ondelete="SET NULL"), nullable=True
     )
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
 
     message: Mapped[Message] = relationship(back_populates="routing_decision")
 
@@ -135,7 +141,7 @@ class QualitySignal(Base):
     signal_type: Mapped[str] = mapped_column(String(32), nullable=False)
     value: Mapped[float] = mapped_column(Float, nullable=False)
     evaluator: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
 
     message: Mapped[Message] = relationship(back_populates="quality_signals")
 
@@ -157,11 +163,12 @@ class ModelPerformance(Base):
 
 class TrainingRun(Base):
     __tablename__ = "training_runs"
-    __table_args__ = (
-        CheckConstraint("status IN ('pending', 'running', 'completed', 'failed')"),
-    )
+    __table_args__ = (CheckConstraint("status IN ('pending', 'running', 'completed', 'failed')"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
+    )
     base_model: Mapped[str] = mapped_column(String(256), nullable=False)
     dataset_size: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
@@ -171,7 +178,7 @@ class TrainingRun(Base):
     ollama_model: Mapped[str | None] = mapped_column(String(256), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
 
 
 class ApiKey(Base):
@@ -180,13 +187,18 @@ class ApiKey(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     key_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
     name: Mapped[str] = mapped_column(String(256), nullable=False)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
+    )
+    role: Mapped[str] = mapped_column(String(32), default="developer")  # admin | developer | viewer
     is_active: Mapped[bool] = mapped_column(default=True)
     rate_limit: Mapped[int] = mapped_column(Integer, default=60)  # requests per minute
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
 
 
 class ProviderAccount(Base):
     """Multiple API keys per provider for load balancing and failover."""
+
     __tablename__ = "provider_accounts"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -202,17 +214,21 @@ class ProviderAccount(Base):
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
 
 
 class UsageRecord(Base):
     """Per-request usage tracking for analytics and billing."""
+
     __tablename__ = "usage_records"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     api_key_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
+    )
     account_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("provider_accounts.id"), nullable=True
+        UUID(as_uuid=True), ForeignKey("provider_accounts.id", ondelete="SET NULL"), nullable=True
     )
     provider: Mapped[str] = mapped_column(String(64), nullable=False)
     model: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -220,19 +236,20 @@ class UsageRecord(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
     cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
-    equivalent_external_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    equivalent_external_cost_usd: Mapped[float] = mapped_column(
+        Numeric(10, 6), nullable=False, default=0
+    )
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     error: Mapped[bool] = mapped_column(default=False)
     cache_hit: Mapped[bool] = mapped_column(default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
 
 
 class UsageHourlyRollup(Base):
     """Pre-aggregated hourly usage for fast time-series queries."""
+
     __tablename__ = "usage_hourly_rollups"
-    __table_args__ = (
-        UniqueConstraint("api_key_hash", "provider", "model", "is_local", "hour"),
-    )
+    __table_args__ = (UniqueConstraint("api_key_hash", "provider", "model", "is_local", "hour"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     api_key_hash: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -244,7 +261,9 @@ class UsageHourlyRollup(Base):
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
-    equivalent_external_cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    equivalent_external_cost_usd: Mapped[float] = mapped_column(
+        Numeric(10, 6), nullable=False, default=0
+    )
     avg_latency_ms: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     p50_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -254,11 +273,16 @@ class UsageHourlyRollup(Base):
 
 # --- Distillation Pipeline ---
 
+
 class DualExecutionRecord(Base):
     """Tracks dual execution: Claude response + local model response for the same request."""
+
     __tablename__ = "dual_execution_records"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
+    )
     task_type: Mapped[str] = mapped_column(String(64), nullable=False)
 
     # Request info
@@ -283,32 +307,140 @@ class DualExecutionRecord(Base):
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # auto-evaluated
     used_for_training: Mapped[bool] = mapped_column(default=False)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
 
 
 class TaskTypeReadiness(Base):
-    """Per-task-type training readiness and graduated handoff tracking."""
+    """Per-task-type training readiness and graduated handoff tracking.
+
+    Lifecycle state machine:
+      LEARNING → TRAINING → EVALUATING → CANARY → GRADUATED → RETIRED
+
+    LEARNING:   Collecting teacher/student pairs. 100% 3rd-party traffic.
+    TRAINING:   QLoRA fine-tuning job running (TrainingRun record active).
+    EVALUATING: lm-eval benchmarks running post-training.
+    CANARY:     1–90% local traffic, promoted gradually if quality holds.
+    GRADUATED:  Local model handles max_local_pct of traffic autonomously.
+    RETIRED:    Superseded by a newer training run.
+    """
+
     __tablename__ = "task_type_readiness"
-    __table_args__ = (UniqueConstraint("task_type"),)
+    __table_args__ = (
+        UniqueConstraint("task_type"),
+        CheckConstraint(
+            "lifecycle_state IN "
+            "('learning','training','evaluating','canary','graduated','retired')",
+            name="chk_lifecycle_state",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     task_type: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # Lifecycle state machine
+    lifecycle_state: Mapped[str] = mapped_column(String(16), default="learning")
+
+    # Sample collection
     claude_sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    training_threshold: Mapped[int] = mapped_column(Integer, default=100)
+
+    # Quality tracking
     local_avg_quality: Mapped[float] = mapped_column(Float, default=0.0)
+    quality_gate_score: Mapped[float] = mapped_column(
+        Float, default=0.75
+    )  # min for canary→graduated
+    lm_eval_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Traffic routing
     local_handoff_pct: Mapped[float] = mapped_column(Float, default=0.0)  # 0.0 to 1.0
-    max_local_pct: Mapped[float] = mapped_column(Float, default=0.9)  # per-task cap, overrides global setting
+    max_local_pct: Mapped[float] = mapped_column(Float, default=0.9)  # per-task cap
+
+    # Model tracking
     best_local_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     last_training_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Lifecycle timestamps
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    canary_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    graduated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_regression_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Argilla annotation gate
     argilla_review_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # Values: None (no pending review), "pending_argilla_review", "approved", "rejected"
+    # Values: None | "pending_argilla_review" | "approved" | "rejected"
     argilla_batch_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    # Argilla dataset name for the pending or last-completed review batch
+
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        DateTime(timezone=True), default=_now_ist, onupdate=_now_ist
     )
 
 
+# ---------------------------------------------------------------------------
+# Organizational Platform — P1 schema (workspaces / teams / channels)
+# ---------------------------------------------------------------------------
+
+
+class Workspace(Base):
+    """Top-level organizational unit. All teams, agents, and apps belong to one."""
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    slug: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    settings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    computer_use_allowed: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+
+    teams: Mapped[list["Team"]] = relationship(
+        back_populates="workspace", cascade="all, delete-orphan"
+    )
+
+
+class Team(Base):
+    """A group within a workspace with a shared Atlas model and persona."""
+
+    __tablename__ = "teams"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    atlas_model: Mapped[str] = mapped_column(String(64), default="atlas-plan")
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+
+    workspace: Mapped[Workspace] = relationship(back_populates="teams")
+    channels: Mapped[list["Channel"]] = relationship(
+        back_populates="team", cascade="all, delete-orphan"
+    )
+
+
+class Channel(Base):
+    """A conversation channel within a team (e.g., #engineering, #data-qa)."""
+
+    __tablename__ = "channels"
+    __table_args__ = (UniqueConstraint("team_id", "name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    team_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teams.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    topic: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+
+    team: Mapped[Team] = relationship(back_populates="channels")
+
+
+# ---------------------------------------------------------------------------
 # Indexes
 Index("ix_dual_exec_task_type", DualExecutionRecord.task_type)
 Index("ix_dual_exec_created", DualExecutionRecord.created_at)
@@ -322,3 +454,457 @@ Index("ix_usage_records_created", UsageRecord.created_at)
 Index("ix_usage_records_api_key_created", UsageRecord.api_key_hash, UsageRecord.created_at)
 Index("ix_usage_records_provider_model", UsageRecord.provider, UsageRecord.model)
 Index("ix_usage_hourly_hour", UsageHourlyRollup.hour)
+Index("ix_workspaces_slug", Workspace.slug)
+Index("ix_teams_workspace", Team.workspace_id)
+Index("ix_channels_team", Channel.team_id)
+
+# ---------------------------------------------------------------------------
+# Organizational Platform — P2 schema (agents / applications)
+# ---------------------------------------------------------------------------
+
+
+class Application(Base):
+    """A packaged AI deployment: system prompt + tools + Atlas model + API key.
+
+    Teams deploy applications to give end-users access to a focused AI persona
+    (e.g. "Code Reviewer Bot", "Data Q&A Assistant").
+    """
+
+    __tablename__ = "applications"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    display_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    atlas_model: Mapped[str] = mapped_column(String(64), default="atlas-plan")
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tools: Mapped[dict] = mapped_column(JSONB, default=list)  # list of tool name strings
+    agent_pool: Mapped[dict] = mapped_column(JSONB, default=list)  # list of agent UUIDs
+    rate_limit_rpm: Mapped[int] = mapped_column(Integer, default=60)
+    app_settings: Mapped[dict] = mapped_column(JSONB, default=dict)
+    is_active: Mapped[bool] = mapped_column(default=True)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_ist, onupdate=_now_ist
+    )
+
+    agents: Mapped[list["Agent"]] = relationship(
+        "Agent",
+        primaryjoin="Application.id == Agent.app_id",
+        foreign_keys="Agent.app_id",
+        back_populates="application",
+        cascade="all, delete-orphan",
+    )
+
+
+class Agent(Base):
+    """A named AI agent: Atlas model + persona + tool manifest + memory config.
+
+    Agents can be standalone (direct API use), channel-bound (team chat),
+    or application-bound (part of an Application's agent pool).
+    Supports hierarchical agent trees via parent_id for CEO/Manager/Worker patterns.
+    """
+
+    __tablename__ = "agents"
+    __table_args__ = (UniqueConstraint("workspace_id", "name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    app_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("applications.id", ondelete="SET NULL"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)  # slug: "data-analyst-bot"
+    display_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    atlas_model: Mapped[str] = mapped_column(String(64), default="atlas-plan")
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tools: Mapped[dict] = mapped_column(JSONB, default=list)  # list of tool name strings
+    memory_config: Mapped[dict] = mapped_column(
+        JSONB, default=dict
+    )  # {"type": "sliding_window", "limit": 20}
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="active"
+    )  # active | paused | terminated
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_ist, onupdate=_now_ist
+    )
+
+    application: Mapped["Application | None"] = relationship(
+        "Application", foreign_keys=[app_id], back_populates="agents"
+    )
+    children: Mapped[list["Agent"]] = relationship(
+        "Agent", foreign_keys=[parent_id], back_populates="parent"
+    )
+    parent: Mapped["Agent | None"] = relationship(
+        "Agent", foreign_keys=[parent_id], back_populates="children", remote_side="Agent.id"
+    )
+    executions: Mapped[list["AgentExecution"]] = relationship(
+        back_populates="agent", cascade="all, delete-orphan"
+    )
+
+
+class AgentMessage(Base):
+    """Agent-to-agent message queue for orchestration and delegation."""
+
+    __tablename__ = "agent_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','processing','completed','failed')", name="chk_amsg_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    from_agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True
+    )
+    to_agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    task_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentExecution(Base):
+    """Audit log of every agent invocation: task, result, cost, latency."""
+
+    __tablename__ = "agent_executions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="CASCADE"), nullable=False
+    )
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+    )
+    task: Mapped[str] = mapped_column(Text, nullable=False)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    steps: Mapped[int] = mapped_column(Integer, default=1)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cost_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+
+    agent: Mapped[Agent] = relationship(back_populates="executions")
+
+
+# ---------------------------------------------------------------------------
+# Organizational Platform — P3 schema (task plans / channel members)
+# ---------------------------------------------------------------------------
+
+
+class TaskPlan(Base):
+    """A multi-step plan decomposed by atlas-plan (CEO) into an execution tree.
+
+    The decomposed field is a JSON tree of:
+    [{"task": str, "agent_name": str, "dependencies": [int], "status": str, "result": str}]
+    """
+
+    __tablename__ = "task_plans"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('planning','executing','completed','failed','cancelled')",
+            name="chk_plan_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    root_task: Mapped[str] = mapped_column(Text, nullable=False)
+    decomposed: Mapped[dict] = mapped_column(JSONB, default=list)  # tree of subtasks
+    status: Mapped[str] = mapped_column(String(16), default="planning")
+    executor_agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True
+    )
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    steps_completed: Mapped[int] = mapped_column(Integer, default=0)
+    steps_total: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChannelMember(Base):
+    """Membership record linking users to channels."""
+
+    __tablename__ = "channel_members"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "user_id"),
+        CheckConstraint("role IN ('admin','member','viewer')", name="chk_member_role"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    role: Mapped[str] = mapped_column(String(16), default="member")
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+
+
+# P2 Indexes
+Index("ix_applications_workspace", Application.workspace_id)
+Index("ix_agents_workspace", Agent.workspace_id)
+Index("ix_agents_app", Agent.app_id)
+Index("ix_agent_messages_to", AgentMessage.to_agent_id)
+Index("ix_agent_messages_status", AgentMessage.status)
+Index("ix_agent_executions_agent", AgentExecution.agent_id)
+
+# P3 Indexes
+Index("ix_task_plans_workspace", TaskPlan.workspace_id)
+Index("ix_task_plans_status", TaskPlan.status)
+Index("ix_channel_members_channel", ChannelMember.channel_id)
+Index("ix_channel_members_user", ChannelMember.user_id)
+
+
+# ---------------------------------------------------------------------------
+# P4: Computer Usage + Notebook
+# ---------------------------------------------------------------------------
+
+
+class ComputerSession(Base):
+    """Audit trail for browser/desktop automation sessions."""
+
+    __tablename__ = "computer_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active','completed','failed','terminated')",
+            name="chk_computer_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("agents.id", ondelete="SET NULL"), nullable=True
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    session_type: Mapped[str] = mapped_column(String(16), default="browser")  # browser | desktop
+    start_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    screenshot_count: Mapped[int] = mapped_column(Integer, default=0)
+    actions_taken: Mapped[dict] = mapped_column(JSONB, default=list)  # [{action, ts, detail}]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Notebook(Base):
+    """AI-assisted notebook (Jupyter-compatible cell model)."""
+
+    __tablename__ = "notebooks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    kernel: Mapped[str] = mapped_column(String(64), default="python")  # python | sql | bash
+    atlas_model: Mapped[str] = mapped_column(String(64), default="atlas-code")
+    metadata_: Mapped[dict] = mapped_column("metadata", JSONB, default=dict)
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_ist, onupdate=_now_ist
+    )
+
+    cells: Mapped[list["NotebookCell"]] = relationship(
+        back_populates="notebook", order_by="NotebookCell.sequence", cascade="all, delete-orphan"
+    )
+
+
+class NotebookCell(Base):
+    """A single cell in a notebook: code, markdown, or AI prompt."""
+
+    __tablename__ = "notebook_cells"
+    __table_args__ = (
+        CheckConstraint("cell_type IN ('code','markdown','ai')", name="chk_cell_type"),
+        CheckConstraint(
+            "execution_state IN ('idle','running','completed','error')",
+            name="chk_cell_exec_state",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    notebook_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("notebooks.id", ondelete="CASCADE"), nullable=False
+    )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    cell_type: Mapped[str] = mapped_column(String(16), default="code")
+    source: Mapped[str] = mapped_column(Text, default="")  # user code or prompt
+    output: Mapped[str | None] = mapped_column(Text, nullable=True)  # execution result
+    ai_suggestion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_state: Mapped[str] = mapped_column(String(16), default="idle")
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    notebook: Mapped[Notebook] = relationship(back_populates="cells")
+
+
+# P4 Indexes
+Index("ix_computer_sessions_workspace", ComputerSession.workspace_id)
+Index("ix_computer_sessions_agent", ComputerSession.agent_id)
+Index("ix_notebooks_workspace", Notebook.workspace_id)
+Index("ix_notebook_cells_notebook", NotebookCell.notebook_id)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: Governance -- model registry, approvals, audit, budgets
+# ---------------------------------------------------------------------------
+
+
+class ModelVersion(Base):
+    """Tracks trained model versions through their lifecycle.
+
+    draft -> staging -> active -> retired
+    """
+
+    __tablename__ = "model_versions"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('draft','staging','active','retired')",
+            name="chk_model_version_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    base_model: Mapped[str] = mapped_column(String(256), nullable=False)
+    adapter_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    training_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("training_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    eval_scores: Mapped[dict] = mapped_column(JSONB, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    version_tag: Mapped[str | None] = mapped_column(String(64), nullable=True)  # e.g. "v1.2"
+    created_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ModelDeployment(Base):
+    """Tracks where a model version is deployed."""
+
+    __tablename__ = "model_deployments"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','deploying','active','failed','removed')",
+            name="chk_deployment_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    model_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("model_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    target_server: Mapped[str] = mapped_column(
+        String(256), nullable=False
+    )  # e.g. "http://10.0.0.9:11434"
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    deployed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+
+
+class ApprovalRequest(Base):
+    """Human approval gate for model promotions and other governed actions.
+
+    status: pending -> approved | rejected
+    """
+
+    __tablename__ = "approval_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','approved','rejected')",
+            name="chk_approval_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    entity_type: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )  # "model_version", "agent", "handoff"
+    entity_id: Mapped[str] = mapped_column(
+        String(256), nullable=False
+    )  # UUID or identifier of the entity
+    action: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )  # "promote", "graduate", "activate"
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
+    )
+    requested_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)  # context (eval scores, etc.)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AuditEvent(Base):
+    """Immutable audit log for admin actions."""
+
+    __tablename__ = "audit_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True
+    )
+    user_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    api_key_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    action: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )  # "create", "update", "delete", "execute", "approve", "reject"
+    entity_type: Mapped[str] = mapped_column(
+        String(64), nullable=False
+    )  # "agent", "application", "workspace", "training_run", "model_version"
+    entity_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    details: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+
+
+class WorkspaceBudget(Base):
+    """Per-workspace monthly cost budget with enforcement."""
+
+    __tablename__ = "workspace_budgets"
+    __table_args__ = (UniqueConstraint("workspace_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    monthly_limit_usd: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False, default=100.0)
+    current_month_usd: Mapped[float] = mapped_column(Numeric(10, 6), nullable=False, default=0)
+    alert_threshold_pct: Mapped[float] = mapped_column(Float, default=0.8)  # alert at 80%
+    budget_month: Mapped[str] = mapped_column(String(7), nullable=False)  # "2026-04" format
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now_ist)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now_ist, onupdate=_now_ist
+    )
+
+
+# Phase 4 Governance Indexes
+Index("ix_model_versions_task", ModelVersion.task_type)
+Index("ix_model_versions_status", ModelVersion.status)
+Index("ix_model_deployments_version", ModelDeployment.model_version_id)
+Index("ix_approval_requests_status", ApprovalRequest.status)
+Index("ix_approval_requests_entity", ApprovalRequest.entity_type, ApprovalRequest.entity_id)
+Index("ix_audit_events_workspace", AuditEvent.workspace_id)
+Index("ix_audit_events_created", AuditEvent.created_at)
+Index("ix_audit_events_entity", AuditEvent.entity_type)
+Index("ix_workspace_budgets_workspace", WorkspaceBudget.workspace_id)

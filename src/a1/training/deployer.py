@@ -43,9 +43,12 @@ async def deploy_to_ollama(
             from unsloth import FastLanguageModel
 
             model, tokenizer = FastLanguageModel.from_pretrained(
-                model_name=base_model, load_in_4bit=True, max_seq_length=2048,
+                model_name=base_model,
+                load_in_4bit=True,
+                max_seq_length=2048,
             )
             from peft import PeftModel
+
             model = PeftModel.from_pretrained(model, adapter_path)
 
             model.save_pretrained_gguf(gguf_path, tokenizer, quantization_method="q4_k_m")
@@ -59,7 +62,9 @@ async def deploy_to_ollama(
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         log.info("Merging adapter weights (legacy)...")
-        base = AutoModelForCausalLM.from_pretrained(base_model, device_map="cpu", trust_remote_code=True)
+        base = AutoModelForCausalLM.from_pretrained(
+            base_model, device_map="cpu", trust_remote_code=True
+        )
         model = PeftModel.from_pretrained(base, adapter_path)
         merged = model.merge_and_unload()
         merged.save_pretrained(merged_path)
@@ -70,8 +75,19 @@ async def deploy_to_ollama(
 
         try:
             subprocess.run(
-                ["python", "-m", "llama_cpp.convert", merged_path, "--outfile", gguf_path, "--outtype", "q4_0"],
-                check=True, capture_output=True, text=True,
+                [
+                    "python",
+                    "-m",
+                    "llama_cpp.convert",
+                    merged_path,
+                    "--outfile",
+                    gguf_path,
+                    "--outtype",
+                    "q4_0",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
             )
             log.info(f"GGUF conversion complete: {gguf_path}")
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
@@ -82,10 +98,14 @@ async def deploy_to_ollama(
     ollama_model_name = f"a1-{model_name}"
 
     if gguf_path and os.path.exists(gguf_path):
-        modelfile_content = f'FROM {gguf_path}\nSYSTEM "You are a helpful assistant fine-tuned by A1 Trainer."'
+        modelfile_content = (
+            f'FROM {gguf_path}\nSYSTEM "You are a helpful assistant fine-tuned by A1 Trainer."'
+        )
     else:
         # Try using the merged safetensors path directly
-        modelfile_content = f'FROM {merged_path}\nSYSTEM "You are a helpful assistant fine-tuned by A1 Trainer."'
+        modelfile_content = (
+            f'FROM {merged_path}\nSYSTEM "You are a helpful assistant fine-tuned by A1 Trainer."'
+        )
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".Modelfile", delete=False) as f:
         f.write(modelfile_content)
@@ -93,10 +113,13 @@ async def deploy_to_ollama(
 
     try:
         async with httpx.AsyncClient(base_url=settings.ollama_base_url, timeout=600.0) as client:
-            resp = await client.post("/api/create", json={
-                "name": ollama_model_name,
-                "modelfile": modelfile_content,
-            })
+            resp = await client.post(
+                "/api/create",
+                json={
+                    "name": ollama_model_name,
+                    "modelfile": modelfile_content,
+                },
+            )
             if resp.status_code == 200:
                 log.info(f"Registered Ollama model: {ollama_model_name}")
                 return ollama_model_name

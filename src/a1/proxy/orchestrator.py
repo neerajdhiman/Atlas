@@ -58,10 +58,12 @@ async def run_multi_agent(
     if plan_provider:
         decompose_req = ChatCompletionRequest(
             model=plan_model,
-            messages=[MessageInput(
-                role="user",
-                content=_DECOMPOSE_PROMPT.format(input=input_text[:1000]),
-            )],
+            messages=[
+                MessageInput(
+                    role="user",
+                    content=_DECOMPOSE_PROMPT.format(input=input_text[:1000]),
+                )
+            ],
             max_tokens=400,
             temperature=0,
         )
@@ -97,9 +99,7 @@ async def run_multi_agent(
         per_task_tokens = max(max_tokens // max(len(subtasks), 1), 200)
         req = ChatCompletionRequest(
             model=specialist_model,
-            messages=list(context_messages) + [
-                MessageInput(role="user", content=subtask_text)
-            ],
+            messages=list(context_messages) + [MessageInput(role="user", content=subtask_text)],
             max_tokens=per_task_tokens,
         )
         try:
@@ -116,18 +116,18 @@ async def run_multi_agent(
     # ------------------------------------------------------------------ #
     # Step 3: Synthesize with atlas-plan                                  #
     # ------------------------------------------------------------------ #
-    outputs_text = "\n\n".join(
-        f"[{model}]: {text}" for model, text in specialist_results
-    )
+    outputs_text = "\n\n".join(f"[{model}]: {text}" for model, text in specialist_results)
     synth_req = ChatCompletionRequest(
         model=plan_model,
-        messages=[MessageInput(
-            role="user",
-            content=_SYNTHESIZE_PROMPT.format(
-                input=input_text[:600],
-                outputs=outputs_text,
-            ),
-        )],
+        messages=[
+            MessageInput(
+                role="user",
+                content=_SYNTHESIZE_PROMPT.format(
+                    input=input_text[:600],
+                    outputs=outputs_text,
+                ),
+            )
+        ],
         max_tokens=max_tokens,
     )
 

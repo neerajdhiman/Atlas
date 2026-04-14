@@ -3,6 +3,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
+from a1.common.logging import get_logger
 from a1.providers.base import LLMProvider, ModelInfo
 from a1.proxy.request_models import ChatCompletionRequest
 from a1.proxy.response_models import (
@@ -14,7 +15,6 @@ from a1.proxy.response_models import (
     StreamChoice,
     Usage,
 )
-from a1.common.logging import get_logger
 from config.settings import settings
 
 log = get_logger("providers.vertex")
@@ -77,15 +77,18 @@ class VertexProvider(LLMProvider):
         content = response.choices[0].message.content or ""
 
         yield ChatCompletionChunk(
-            id=chunk_id, model=request.model,
+            id=chunk_id,
+            model=request.model,
             choices=[StreamChoice(delta=DeltaMessage(role="assistant"))],
         )
         yield ChatCompletionChunk(
-            id=chunk_id, model=request.model,
+            id=chunk_id,
+            model=request.model,
             choices=[StreamChoice(delta=DeltaMessage(content=content))],
         )
         yield ChatCompletionChunk(
-            id=chunk_id, model=request.model,
+            id=chunk_id,
+            model=request.model,
             choices=[StreamChoice(delta=DeltaMessage(), finish_reason="stop")],
         )
 

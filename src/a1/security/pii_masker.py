@@ -9,7 +9,7 @@ Only applied when sending to external providers (Claude). Local models
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from a1.common.logging import get_logger
 
@@ -17,22 +17,27 @@ log = get_logger("security.pii")
 
 # PII detection patterns
 PII_PATTERNS = {
-    "email": re.compile(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'),
-    "phone": re.compile(r'\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}\b'),
-    "ssn": re.compile(r'\b\d{3}-\d{2}-\d{4}\b'),
-    "credit_card": re.compile(r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'),
-    "api_key": re.compile(r'\b(?:sk|pk|api|key|token|secret)[-_]?[A-Za-z0-9]{16,}\b', re.IGNORECASE),
-    "ip_address": re.compile(r'\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b'),
-    "aws_key": re.compile(r'\b(?:AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}\b'),
-    "aws_secret": re.compile(r'\b[A-Za-z0-9/+=]{40}\b'),
-    "password": re.compile(r'(?i)(?:password|passwd|pwd)\s*[:=]\s*\S+'),
-    "private_key": re.compile(r'-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----'),
+    "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
+    "phone": re.compile(r"\b(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}\b"),
+    "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+    "credit_card": re.compile(r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b"),
+    "api_key": re.compile(
+        r"\b(?:sk|pk|api|key|token|secret)[-_]?[A-Za-z0-9]{16,}\b", re.IGNORECASE
+    ),
+    "ip_address": re.compile(
+        r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
+    ),
+    "aws_key": re.compile(r"\b(?:AKIA|ABIA|ACCA|ASIA)[A-Z0-9]{16}\b"),
+    "aws_secret": re.compile(r"\b[A-Za-z0-9/+=]{40}\b"),
+    "password": re.compile(r"(?i)(?:password|passwd|pwd)\s*[:=]\s*\S+"),
+    "private_key": re.compile(r"-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----"),
 }
 
 
 @dataclass
 class MaskResult:
     """Result of PII masking operation."""
+
     masked_text: str
     mask_map: dict[str, str]  # {placeholder: original_value}
     detections: list[dict]  # [{type, start, end, placeholder}]
@@ -66,12 +71,14 @@ class PIIMasker:
         all_matches = []
         for pii_type, pattern in self.patterns.items():
             for match in pattern.finditer(text):
-                all_matches.append({
-                    "type": pii_type,
-                    "start": match.start(),
-                    "end": match.end(),
-                    "value": match.group(),
-                })
+                all_matches.append(
+                    {
+                        "type": pii_type,
+                        "start": match.start(),
+                        "end": match.end(),
+                        "value": match.group(),
+                    }
+                )
 
         # Sort by position (reverse) to replace from end to start
         all_matches.sort(key=lambda m: m["start"], reverse=True)
@@ -81,7 +88,7 @@ class PIIMasker:
         for match in all_matches:
             overlaps = False
             for existing in filtered:
-                if (match["start"] < existing["end"] and match["end"] > existing["start"]):
+                if match["start"] < existing["end"] and match["end"] > existing["start"]:
                     overlaps = True
                     break
             if not overlaps:
@@ -95,14 +102,16 @@ class PIIMasker:
             placeholder = f"[{pii_type.upper()}_{counters[pii_type]}]"
 
             mask_map[placeholder] = match["value"]
-            detections.append({
-                "type": pii_type,
-                "start": match["start"],
-                "end": match["end"],
-                "placeholder": placeholder,
-            })
+            detections.append(
+                {
+                    "type": pii_type,
+                    "start": match["start"],
+                    "end": match["end"],
+                    "placeholder": placeholder,
+                }
+            )
 
-            masked = masked[:match["start"]] + placeholder + masked[match["end"]:]
+            masked = masked[: match["start"]] + placeholder + masked[match["end"] :]
 
         if detections:
             log.info(f"PII masked: {len(detections)} detections ({', '.join(counters.keys())})")

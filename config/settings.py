@@ -10,8 +10,8 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    # Database
-    database_url: str = "postgresql+asyncpg://a1:a1_dev_password@localhost:5432/a1_trainer"
+    # Database (no default -- must be set via A1_DATABASE_URL env var or .env file)
+    database_url: str = ""
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -94,11 +94,19 @@ class Settings(BaseSettings):
     distillation_quality_threshold: float = 0.7
     distillation_handoff_increment: float = 0.1
     distillation_max_handoff_pct: float = 0.9
+    # After this many requests of the same task_type in the current server process,
+    # route to local model directly (if healthy) without waiting for full training.
+    # Set to 0 to disable. Default: 10 — enough to warm up Ollama without training.
+    distillation_task_repeat_threshold: int = 10
 
     # Session memory
     session_enabled: bool = True
     session_ttl_seconds: int = 3600  # 1 hour
     session_max_messages: int = 20  # max history to include per request
+    # Token budget for session history injection. If injected history would exceed
+    # this many tokens, oldest messages are dropped to stay within limit.
+    # 0 = no token budget (rely on session_max_messages count only).
+    session_max_history_tokens: int = 40000
 
     # PII masking (enterprise)
     pii_masking_enabled: bool = True
@@ -107,6 +115,15 @@ class Settings(BaseSettings):
 
     # Groq
     groq_api_key: str = ""
+
+    # Moonshot / Kimi
+    moonshot_api_key: str = ""
+
+    # Platform features
+    computer_use_enabled: bool = False
+    agent_execution_timeout: int = 120    # seconds per agent turn
+    planning_max_depth: int = 3           # CEO→Manager→Worker hierarchy depth
+    planning_max_workers: int = 5         # parallel agent workers per plan
 
     # Phase 1: performance
     parallel_dual_execution: bool = True          # fire local model concurrently with external

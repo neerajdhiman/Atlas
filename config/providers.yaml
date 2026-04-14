@@ -3,18 +3,38 @@ providers:
   anthropic:
     enabled: true
     models:
+      - name: claude-opus-4-20250514
+        context_window: 200000
+        cost_per_1k_input: 0.015
+        cost_per_1k_output: 0.075
+        supports_tools: true
+        supports_streaming: true
+        supports_vision: true
+        supports_computer_use: true
+        max_output_tokens: 32000
+        tier: frontier
+        latency_class: normal
       - name: claude-sonnet-4-20250514
         context_window: 200000
         cost_per_1k_input: 0.003
         cost_per_1k_output: 0.015
         supports_tools: true
         supports_streaming: true
+        supports_vision: true
+        supports_computer_use: true
+        max_output_tokens: 16000
+        tier: standard
+        latency_class: normal
       - name: claude-haiku-4-5-20251001
         context_window: 200000
         cost_per_1k_input: 0.001
         cost_per_1k_output: 0.005
         supports_tools: true
         supports_streaming: true
+        supports_vision: true
+        max_output_tokens: 8192
+        tier: fast
+        latency_class: realtime
 
   openai:
     enabled: true
@@ -25,18 +45,29 @@ providers:
         cost_per_1k_output: 0.015
         supports_tools: true
         supports_streaming: true
+        supports_vision: true
+        max_output_tokens: 16384
+        tier: frontier
+        latency_class: normal
       - name: gpt-4o-mini
         context_window: 128000
         cost_per_1k_input: 0.00015
         cost_per_1k_output: 0.0006
         supports_tools: true
         supports_streaming: true
+        supports_vision: true
+        max_output_tokens: 16384
+        tier: fast
+        latency_class: normal
       - name: o3-mini
         context_window: 200000
         cost_per_1k_input: 0.0011
         cost_per_1k_output: 0.0044
         supports_tools: true
         supports_streaming: true
+        max_output_tokens: 65536
+        tier: frontier
+        latency_class: batch
 
   # --- Groq (ultra-fast inference, <200ms TTFT) ---
   groq:
@@ -48,12 +79,18 @@ providers:
         cost_per_1k_output: 0.00006
         supports_tools: true
         supports_streaming: true
+        max_output_tokens: 32768
+        tier: standard
+        latency_class: realtime
       - name: llama-3.1-8b-instant
         context_window: 128000
         cost_per_1k_input: 0.00005
         cost_per_1k_output: 0.00008
         supports_tools: true
         supports_streaming: true
+        max_output_tokens: 8192
+        tier: fast
+        latency_class: realtime
 
   vertex:
     enabled: false
@@ -64,6 +101,52 @@ providers:
         cost_per_1k_output: 0.0006
         supports_tools: true
         supports_streaming: true
+        supports_vision: true
+        max_output_tokens: 8192
+        tier: fast
+        latency_class: normal
+      - name: gemini-1.5-pro
+        context_window: 2000000
+        cost_per_1k_input: 0.00125
+        cost_per_1k_output: 0.005
+        supports_tools: true
+        supports_streaming: true
+        supports_vision: true
+        max_output_tokens: 8192
+        tier: frontier
+        latency_class: normal
+
+  # --- Moonshot / Kimi (long-context, cost-efficient) ---
+  moonshot:
+    enabled: false   # set A1_MOONSHOT_API_KEY to enable
+    models:
+      - name: moonshot-v1-128k
+        context_window: 128000
+        cost_per_1k_input: 0.0008
+        cost_per_1k_output: 0.0024
+        supports_tools: true
+        supports_streaming: true
+        max_output_tokens: 4096
+        tier: standard
+        latency_class: normal
+      - name: moonshot-v1-32k
+        context_window: 32000
+        cost_per_1k_input: 0.0004
+        cost_per_1k_output: 0.0012
+        supports_tools: true
+        supports_streaming: true
+        max_output_tokens: 4096
+        tier: fast
+        latency_class: normal
+      - name: moonshot-v1-8k
+        context_window: 8192
+        cost_per_1k_input: 0.0001
+        cost_per_1k_output: 0.0003
+        supports_tools: true
+        supports_streaming: true
+        max_output_tokens: 4096
+        tier: fast
+        latency_class: realtime
 
   # --- Local Servers (free, auto-discovered from Ollama) ---
   ollama:
@@ -75,8 +158,8 @@ providers:
         # Models: deepseek-coder-v2:16b, deepseek-coder:6.7b, llama3.2, nomic-embed-text
       - url: http://10.0.0.10:11434
         name: alpheric.com
-        description: QA, security, reasoning, DevOps
-        # Models: codellama:13b, deepseek-r1:8b, mistral:7b
+        description: QA, security, reasoning, DevOps, multimodal
+        # Models: codellama:13b, deepseek-r1:8b, mistral:7b, gemma4:12b
     models: []  # auto-discovered
 
   # --- OpenClaw Gateway (local network AI gateway) ---
@@ -97,9 +180,16 @@ providers:
         cost_per_1k_output: 0.0
         supports_tools: true
         supports_streaming: true
-        task_types: [chat, general]
+        task_types: [chat, general, creative]
         description: "Planning, discussion, brainstorming"
-        local_fallback: llama3.2:latest
+        local_fallback: gemma4:12b
+        provider_preference: [moonshot, groq, anthropic, claude-cli, openai]
+        provider_models:
+          moonshot: moonshot-v1-128k
+          groq: llama-3.3-70b-versatile
+          anthropic: claude-sonnet-4-20250514
+          claude-cli: ~
+          openai: gpt-4o-mini
         system_prompt_suffix: >
           You excel at strategic planning, collaborative discussion, and structured
           brainstorming. Break complex problems into clear phases. When proposing plans,
@@ -114,6 +204,12 @@ providers:
         task_types: [code, structured_extraction]
         description: "Code generation, debugging, review"
         local_fallback: deepseek-coder-v2:16b
+        provider_preference: [groq, anthropic, claude-cli, openai]
+        provider_models:
+          groq: llama-3.3-70b-versatile
+          anthropic: claude-sonnet-4-20250514
+          claude-cli: ~
+          openai: gpt-4o
         system_prompt_suffix: >
           You are an expert software engineer. Apply clean-code principles, SOLID design,
           and language-specific idioms. For debugging: identify root cause before fixing.
@@ -128,6 +224,12 @@ providers:
         task_types: [analysis, math]
         description: "Security analysis, reasoning, auditing"
         local_fallback: deepseek-r1:8b
+        provider_preference: [anthropic, claude-cli, groq, openai]
+        provider_models:
+          anthropic: claude-opus-4-20250514
+          claude-cli: ~
+          groq: llama-3.3-70b-versatile
+          openai: gpt-4o
         system_prompt_suffix: >
           You are a cybersecurity expert fluent in MITRE ATT&CK, CVSS scoring, OWASP Top 10,
           and threat modeling (STRIDE, PASTA). Map findings to ATT&CK tactics and techniques
@@ -139,9 +241,15 @@ providers:
         cost_per_1k_output: 0.0
         supports_tools: true
         supports_streaming: true
-        task_types: [code]
+        task_types: [infra, code]
         description: "Infrastructure, DevOps, deployment"
         local_fallback: codellama:13b
+        provider_preference: [anthropic, claude-cli, groq, openai]
+        provider_models:
+          anthropic: claude-sonnet-4-20250514
+          claude-cli: ~
+          groq: llama-3.3-70b-versatile
+          openai: gpt-4o
         system_prompt_suffix: >
           You are a senior DevOps and platform engineer. Apply infrastructure-as-code best
           practices for Terraform, Kubernetes, Docker, and CI/CD pipelines. Prioritize
@@ -155,7 +263,14 @@ providers:
         supports_streaming: true
         task_types: [analysis, summarization, math]
         description: "Data analysis, statistics, ETL"
-        local_fallback: mistral:7b
+        local_fallback: gemma4:12b
+        provider_preference: [openai, moonshot, groq, anthropic, claude-cli]
+        provider_models:
+          openai: gpt-4o
+          moonshot: moonshot-v1-128k
+          groq: llama-3.3-70b-versatile
+          anthropic: claude-sonnet-4-20250514
+          claude-cli: ~
         system_prompt_suffix: >
           You are a data scientist and analytics engineer. Apply statistical rigor: state
           assumptions, validate distributions, and flag confounding variables. For ETL tasks,
@@ -169,7 +284,14 @@ providers:
         supports_streaming: true
         task_types: [creative, summarization, translation]
         description: "Documentation, writing, research"
-        local_fallback: llama3.2:latest
+        local_fallback: gemma4:12b
+        provider_preference: [moonshot, openai, groq, anthropic, claude-cli]
+        provider_models:
+          moonshot: moonshot-v1-128k
+          openai: gpt-4o-mini
+          groq: llama-3.3-70b-versatile
+          anthropic: claude-sonnet-4-20250514
+          claude-cli: ~
         system_prompt_suffix: >
           You are an expert technical writer and researcher. Produce clear, audience-aware
           prose — adjust tone and vocabulary to the reader's expertise level. For documentation:
@@ -184,6 +306,12 @@ providers:
         task_types: [structured_extraction, analysis]
         description: "Compliance auditing, log analysis, structured extraction"
         local_fallback: deepseek-coder:6.7b
+        provider_preference: [openai, anthropic, claude-cli, groq]
+        provider_models:
+          openai: gpt-4o
+          anthropic: claude-opus-4-20250514
+          claude-cli: ~
+          groq: llama-3.3-70b-versatile
         system_prompt_suffix: >
           You are a compliance and audit specialist. Apply regulatory frameworks including
           SOC 2, ISO 27001, GDPR, HIPAA, and PCI-DSS. For log analysis: extract anomalies,

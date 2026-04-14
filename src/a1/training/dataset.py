@@ -28,6 +28,7 @@ def build_dataset(samples: list[dict], output_dir: str | None = None) -> dict:
 
     # Shuffle deterministically
     import random
+
     rng = random.Random(42)
     rng.shuffle(samples)
 
@@ -73,7 +74,9 @@ def load_dataset_for_training(dataset_dir: str) -> tuple:
     """
     from datasets import load_dataset
 
-    train_ds = load_dataset("json", data_files=os.path.join(dataset_dir, "train.jsonl"), split="train")
+    train_ds = load_dataset(
+        "json", data_files=os.path.join(dataset_dir, "train.jsonl"), split="train"
+    )
     val_ds = load_dataset("json", data_files=os.path.join(dataset_dir, "val.jsonl"), split="train")
 
     return train_ds, val_ds

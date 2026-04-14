@@ -15,6 +15,13 @@ class ModelInfo:
     cost_per_1k_output: float
     supports_tools: bool
     supports_streaming: bool
+    # Capability flags
+    supports_vision: bool = False
+    supports_computer_use: bool = False
+    max_output_tokens: int = 4096
+    # Classification
+    tier: str = "standard"  # "fast" | "standard" | "frontier"
+    latency_class: str = "normal"  # "realtime" | "normal" | "batch"
 
 
 class LLMProvider(ABC):

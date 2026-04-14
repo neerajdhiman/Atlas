@@ -1,7 +1,6 @@
 """Import conversation history from paperclip.ing."""
 
 import json
-from datetime import datetime
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,10 +49,13 @@ async def import_from_paperclip(
 
                 # Check if already imported (dedup)
                 existing = await session.execute(
-                    __import__("sqlalchemy").select(
-                        __import__("a1.db.models", fromlist=["Conversation"]).Conversation
-                    ).where(
-                        __import__("a1.db.models", fromlist=["Conversation"]).Conversation.external_id == external_id
+                    __import__("sqlalchemy")
+                    .select(__import__("a1.db.models", fromlist=["Conversation"]).Conversation)
+                    .where(
+                        __import__(
+                            "a1.db.models", fromlist=["Conversation"]
+                        ).Conversation.external_id
+                        == external_id
                     )
                 )
                 if existing.scalar_one_or_none():
@@ -146,14 +148,17 @@ async def import_from_paperclip_db(
     msg_repo = MessageRepo(session)
 
     # Connect to paperclip DB (sync, for simplicity)
-    from sqlalchemy import create_engine
     pc_engine = create_engine(db_url)
 
     with pc_engine.connect() as pc_conn:
         # Query conversations
-        rows = pc_conn.execute(text(
-            "SELECT id, title, created_at, messages FROM tickets ORDER BY created_at DESC LIMIT :limit"
-        ), {"limit": limit}).fetchall()
+        rows = pc_conn.execute(
+            text(
+                "SELECT id, title, created_at, messages "
+                "FROM tickets ORDER BY created_at DESC LIMIT :limit"
+            ),
+            {"limit": limit},
+        ).fetchall()
 
         for row in rows:
             try:

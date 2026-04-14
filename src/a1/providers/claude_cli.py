@@ -6,11 +6,11 @@ a separate API key since the CLI manages token refresh automatically.
 """
 
 import asyncio
-import json
 import uuid
 from collections.abc import AsyncIterator
 
 from a1.common.logging import get_logger
+from a1.common.tokens import count_messages_tokens_for_model, count_tokens_for_model
 from a1.providers.base import LLMProvider, ModelInfo
 from a1.proxy.request_models import ChatCompletionRequest
 from a1.proxy.response_models import (
@@ -22,7 +22,6 @@ from a1.proxy.response_models import (
     StreamChoice,
     Usage,
 )
-from a1.common.tokens import count_tokens_for_model, count_messages_tokens_for_model
 
 log = get_logger("providers.claude_cli")
 
@@ -41,7 +40,9 @@ def get_atlas_system_suffix(atlas_model: str) -> str:
         _atlas_suffixes = {}
         try:
             import os
+
             import yaml
+
             config_path = os.path.join(
                 os.path.dirname(__file__), "..", "..", "..", "config", "providers.yaml"
             )
@@ -107,9 +108,9 @@ class ClaudeCLIProvider(LLMProvider):
     @staticmethod
     def _find_claude_cli() -> str:
         """Find the claude CLI executable path."""
+        import os
         import shutil
         import sys
-        import os
 
         # Try common locations
         candidates = [
@@ -126,66 +127,118 @@ class ClaudeCLIProvider(LLMProvider):
         # Fallback — let the OS find it via shell
         return "claude.cmd" if sys.platform == "win32" else "claude"
 
+    @staticmethod
+    def _strip_tool_definitions(text: str) -> str:
+        """Remove tool definition blocks from system prompt.
+
+        Claude CLI can't execute tools, so including them
+        causes Claude to attempt tool_use and waste turns.
+        """
+        import re
+
+        # Remove "Available tools:" block (bullet list)
+        text = re.sub(
+            r"\n*Available tools:\n(?:- .+\n?)+",
+            "",
+            text,
+        )
+        # Remove "## Tooling" section entirely
+        text = re.sub(
+            r"\n*## Tooling\n[\s\S]*?(?=\n## |\Z)",
+            "",
+            text,
+        )
+        # Remove "## Tools" section entirely
+        text = re.sub(
+            r"\n*## Tools\n[\s\S]*?(?=\n## |\Z)",
+            "",
+            text,
+        )
+        # Remove "Tool availability" lines
+        text = re.sub(
+            r"Tool availability[^\n]*\n?",
+            "",
+            text,
+        )
+        text = re.sub(
+            r"Tool names are case-sensitive[^\n]*\n?",
+            "",
+            text,
+        )
+        # Remove lines like "- toolname(params): desc"
+        text = re.sub(
+            r"\n- \w+\([^)]*\):[^\n]+",
+            "",
+            text,
+        )
+        return text.strip()
+
     async def _run_claude(self, prompt: str, system: str = "", max_tokens: int = 1000) -> dict:
         """Run the claude CLI with a prompt and return parsed JSON result.
 
         Returns dict with: result (text), usage (tokens), duration_api_ms, cost
         """
+        # Strip tool definitions — Claude CLI can't execute
+        # tools and will waste turns trying to call them
+        system = self._strip_tool_definitions(system)
+
+        # --tools "" disables ALL built-in tools (correct flag; --allowedTools is an allowlist, not a blocklist)
+        # --bare skips CLAUDE.md auto-discovery, auto-memory, hooks, and LSP — keeps responses clean
+        # --no-session-persistence stops Claude from saving sessions to disk between runs
         args = [
-            "-p", prompt,
-            "--max-turns", "3",
-            "--output-format", "json",
+            "-p",
+            prompt,
+            "--max-turns",
+            "1",
+            "--output-format",
+            "json",
+            "--tools",
+            "",  # disable all built-in tools so Claude responds with text only
+            "--no-session-persistence",  # don't save/load sessions from disk
         ]
 
-        # Prepend Atlas identity to system prompt
+        # Prepend Atlas identity to system prompt.
         atlas_identity = (
             "You are Atlas, an AI assistant by Alpheric.AI. "
             "Never identify as Claude, Anthropic, or any other AI. "
-            "You are Atlas and your responses represent "
-            "the Alpheric.AI platform."
+            "You are Atlas and your responses represent the Alpheric.AI platform. "
+            "Respond with text only. Do not use any tools."
         )
-        full_system = (
-            f"{atlas_identity}\n\n{system}" if system
-            else atlas_identity
-        )
-        args.extend(["--system-prompt", full_system])
+        full_system = f"{atlas_identity}\n\n{system}" if system else atlas_identity
 
-        # Log command length for debugging Windows arg limits
-        total_len = sum(len(a) for a in args)
-        if total_len > 7000:
-            log.warning(
-                f"Claude CLI args very long ({total_len} chars)"
-                f" — may hit Windows 8191 char limit"
-            )
+        # Always use stdin to pipe the prompt — avoids Windows cmd.exe quoting issues
+        # with special characters (Unicode arrows, brackets, newlines) in the prompt.
+        stdin_text = (
+            f"[System Instructions]\n{system}\n\n[User Message]\n{prompt}" if system else prompt
+        )
+        stdin_data = stdin_text.encode("utf-8")
+        args[1] = "-"  # replace prompt arg with "-" (read from stdin)
+        args.extend(["--system-prompt", atlas_identity])
 
         output, code, stderr = await self._exec(
-            args, timeout=120,
+            args,
+            timeout=120,
+            stdin_data=stdin_data,
         )
 
         if code != 0:
-            log.error(
-                f"Claude CLI exit={code} "
-                f"stderr={stderr[:500] if stderr else 'empty'}"
-            )
+            log.error(f"Claude CLI exit={code} stderr={stderr[:500] if stderr else 'empty'}")
             if not output:
                 raise RuntimeError(
-                    f"Claude CLI exit code {code}: "
-                    f"{stderr[:300] if stderr else 'no output'}"
+                    f"Claude CLI exit code {code}: {stderr[:300] if stderr else 'no output'}"
                 )
 
         # Parse JSON response for accurate token counts
         try:
             import json
+
             data = json.loads(output)
 
             # Extract text — handle error_max_turns where
             # result may be empty because Claude tried tool_use
             text = data.get("result", "")
             if not text and data.get("subtype") == "error_max_turns":
-                log.warning(
-                    "Claude hit max turns (tool_use), "
-                    "returning partial result"
-                )
+                log.warning("Claude hit max turns (tool_use), returning partial result")
                 text = (
                     "I can help with that, but I don't have "
                     "access to external tools. Let me answer "
@@ -195,17 +248,21 @@ class ClaudeCLIProvider(LLMProvider):
             return {
                 "text": text or output,
                 "input_tokens": data.get(
-                    "usage", {},
+                    "usage",
+                    {},
                 ).get("input_tokens", 0),
                 "output_tokens": data.get(
-                    "usage", {},
+                    "usage",
+                    {},
                 ).get("output_tokens", 0),
                 "cache_read_tokens": data.get(
-                    "usage", {},
+                    "usage",
+                    {},
                 ).get("cache_read_input_tokens", 0),
                 "cost_usd": data.get("total_cost_usd", 0.0),
                 "api_duration_ms": data.get(
-                    "duration_api_ms", 0,
+                    "duration_api_ms",
+                    0,
                 ),
             }
         except (json.JSONDecodeError, KeyError):
@@ -219,16 +276,41 @@ class ClaudeCLIProvider(LLMProvider):
             }
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
-        # Build prompt from messages
+        # Build prompt from messages.
+        # Multi-turn history is serialised as a structured conversation block so
+        # Claude sees the full dialogue, not just the last user turn.
         system_prompt = ""
-        user_prompt = ""
+        history_turns: list[tuple[str, str]] = []  # (role, content) pairs before last user msg
         for msg in request.messages:
             if msg.role == "system":
                 system_prompt = msg.content or ""
-            elif msg.role == "user":
-                user_prompt = msg.content or ""
-            elif msg.role == "assistant":
-                user_prompt += f"\n\nPrevious assistant response: {msg.content}"
+            else:
+                history_turns.append((msg.role, msg.content or ""))
+
+        # Separate history (everything before the last user message) from the current prompt
+        if history_turns and history_turns[-1][0] == "user":
+            current_user = history_turns[-1][1]
+            prior_turns = history_turns[:-1]
+        elif history_turns:
+            # Last message is not from user — treat all as prior context
+            current_user = ""
+            prior_turns = history_turns
+        else:
+            current_user = ""
+            prior_turns = []
+
+        if prior_turns:
+            # Format prior conversation history so Claude sees full context
+            conv_lines = ["<conversation_history>"]
+            for role, content in prior_turns:
+                label = "Human" if role == "user" else "Assistant"
+                conv_lines.append(f"{label}: {content}")
+            conv_lines.append("</conversation_history>")
+            conv_lines.append("")
+            conv_lines.append(f"Human: {current_user}" if current_user else "")
+            user_prompt = "\n".join(conv_lines).strip()
+        else:
+            user_prompt = current_user
 
         if not user_prompt:
             user_prompt = "Hello"
@@ -244,8 +326,12 @@ class ClaudeCLIProvider(LLMProvider):
         completion_tokens = result["output_tokens"]
         if prompt_tokens == 0:
             # Fallback to estimation
-            messages_dicts = [{"role": m.role, "content": m.content or ""} for m in request.messages]
-            prompt_tokens = count_messages_tokens_for_model(messages_dicts, "claude-sonnet-4-20250514")
+            messages_dicts = [
+                {"role": m.role, "content": m.content or ""} for m in request.messages
+            ]
+            prompt_tokens = count_messages_tokens_for_model(
+                messages_dicts, "claude-sonnet-4-20250514"
+            )
             completion_tokens = count_tokens_for_model(result["text"], "claude-sonnet-4-20250514")
 
         return ChatCompletionResponse(
@@ -260,84 +346,167 @@ class ClaudeCLIProvider(LLMProvider):
             provider=self.name,
         )
 
-    async def stream(self, request: ChatCompletionRequest) -> AsyncIterator[ChatCompletionChunk]:
-        """Stream tokens from Claude CLI as they arrive."""
+    async def stream(
+        self,
+        request: ChatCompletionRequest,
+    ) -> AsyncIterator[ChatCompletionChunk]:
+        """Stream tokens from Claude CLI as they arrive.
+
+        Applies same fixes as _run_claude: tool stripping,
+        --tools "", stdin for large payloads.
+        """
         system_prompt = ""
-        user_prompt = ""
+        history_turns: list[tuple[str, str]] = []
         for msg in request.messages:
             if msg.role == "system":
                 system_prompt = msg.content or ""
-            elif msg.role == "user":
-                user_prompt = msg.content or ""
-            elif msg.role == "assistant":
-                user_prompt += f"\n\nPrevious assistant response: {msg.content}"
+            else:
+                history_turns.append((msg.role, msg.content or ""))
+
+        if history_turns and history_turns[-1][0] == "user":
+            current_user = history_turns[-1][1]
+            prior_turns = history_turns[:-1]
+        elif history_turns:
+            current_user = ""
+            prior_turns = history_turns
+        else:
+            current_user = ""
+            prior_turns = []
+
+        if prior_turns:
+            conv_lines = ["<conversation_history>"]
+            for role, content in prior_turns:
+                label = "Human" if role == "user" else "Assistant"
+                conv_lines.append(f"{label}: {content}")
+            conv_lines.append("</conversation_history>")
+            conv_lines.append("")
+            conv_lines.append(f"Human: {current_user}" if current_user else "")
+            user_prompt = "\n".join(conv_lines).strip()
+        else:
+            user_prompt = current_user
 
         if not user_prompt:
             user_prompt = "Hello"
 
+        # Strip tool definitions
+        system_prompt = self._strip_tool_definitions(system_prompt)
+
         atlas_identity = (
-            "You are Atlas, an AI assistant by Alpheric.AI. "
-            "Never identify as Claude, Anthropic, or any other AI. "
-            "You are Atlas and your responses represent the Alpheric.AI platform."
+            "You are Atlas, an AI assistant by "
+            "Alpheric.AI. Never identify as Claude, "
+            "Anthropic, or any other AI. You are Atlas "
+            "and your responses represent the "
+            "Alpheric.AI platform."
         )
         full_system = f"{atlas_identity}\n\n{system_prompt}" if system_prompt else atlas_identity
 
         chunk_id = f"chatcmpl-cli-{uuid.uuid4().hex[:8]}"
-        import os, sys
+        import os
+        import sys
 
-        # Force UTF-8 for emoji/unicode handling on Windows
-        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "LANG": "en_US.UTF-8"}
+        env = {
+            **os.environ,
+            "PYTHONIOENCODING": "utf-8",
+            "LANG": "en_US.UTF-8",
+        }
 
-        # Start CLI in text streaming mode (tokens arrive as they're generated).
-        # Use create_subprocess_exec (never shell) to prevent command injection
-        # from user-controlled content. On Windows, .cmd/.bat files require
-        # cmd.exe as the launcher — args are still passed as discrete list
-        # elements, never joined into a shell string.
         cli = self._cli_path
-        base_cmd = [cli, "-p", user_prompt, "--max-turns", "1", "--system-prompt", full_system]
+        # Always use stdin — avoids Windows cmd.exe quoting issues with Unicode chars.
+        stdin_text = (
+            f"[System Instructions]\n{system_prompt}\n\n[User Message]\n{user_prompt}"
+            if system_prompt
+            else user_prompt
+        )
+        stdin_data = stdin_text.encode("utf-8")
+        base_cmd = [
+            cli,
+            "-p",
+            "-",  # read prompt from stdin
+            "--max-turns",
+            "1",
+            "--tools",
+            "",  # disable all built-in tools
+            "--no-session-persistence",
+            "--system-prompt",
+            atlas_identity,
+        ]
+
         if sys.platform == "win32" and cli.lower().endswith((".cmd", ".bat")):
             exec_cmd = ["cmd.exe", "/c"] + base_cmd
         else:
             exec_cmd = base_cmd
+
+        stdin_pipe = asyncio.subprocess.PIPE if stdin_data else None
+        import tempfile as _tmpmod
+
         proc = await asyncio.create_subprocess_exec(
             *exec_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            stdin=stdin_pipe,
             env=env,
+            cwd=_tmpmod.gettempdir(),
         )
 
+        # Write stdin data if needed, then close stdin
+        if stdin_data:
+            proc.stdin.write(stdin_data)
+            await proc.stdin.drain()
+            proc.stdin.close()
+
         yield ChatCompletionChunk(
-            id=chunk_id, model=request.model,
-            choices=[StreamChoice(delta=DeltaMessage(role="assistant"))],
+            id=chunk_id,
+            model=request.model,
+            choices=[
+                StreamChoice(
+                    delta=DeltaMessage(role="assistant"),
+                )
+            ],
         )
 
         full_content = ""
         try:
             while True:
-                chunk = await asyncio.wait_for(proc.stdout.read(80), timeout=120)
+                chunk = await asyncio.wait_for(
+                    proc.stdout.read(80),
+                    timeout=120,
+                )
                 if not chunk:
                     break
                 text = chunk.decode("utf-8", errors="replace")
                 full_content += text
                 yield ChatCompletionChunk(
-                    id=chunk_id, model=request.model,
-                    choices=[StreamChoice(delta=DeltaMessage(content=text))],
+                    id=chunk_id,
+                    model=request.model,
+                    choices=[
+                        StreamChoice(
+                            delta=DeltaMessage(content=text),
+                        )
+                    ],
                 )
         except asyncio.TimeoutError:
             pass
 
         await proc.wait()
 
-        # Estimate tokens
         prompt_tokens = count_messages_tokens_for_model(
             [{"role": m.role, "content": m.content or ""} for m in request.messages],
-            "claude-sonnet-4-20250514"
+            "claude-sonnet-4-20250514",
         )
-        completion_tokens = count_tokens_for_model(full_content, "claude-sonnet-4-20250514")
+        completion_tokens = count_tokens_for_model(
+            full_content,
+            "claude-sonnet-4-20250514",
+        )
 
         yield ChatCompletionChunk(
-            id=chunk_id, model=request.model,
-            choices=[StreamChoice(delta=DeltaMessage(), finish_reason="stop")],
+            id=chunk_id,
+            model=request.model,
+            choices=[
+                StreamChoice(
+                    delta=DeltaMessage(),
+                    finish_reason="stop",
+                )
+            ],
             usage=Usage(
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
@@ -346,22 +515,37 @@ class ClaudeCLIProvider(LLMProvider):
         )
 
     async def _exec(
-        self, args: list[str], timeout: float = 30,
+        self,
+        args: list[str],
+        timeout: float = 30,
+        stdin_data: bytes | None = None,
     ) -> tuple[str, int, str]:
-        """Execute CLI command and return (stdout, returncode, stderr)."""
-        import os, sys
+        """Execute CLI command, return (stdout, rc, stderr).
+
+        If stdin_data is provided it is piped to the process
+        stdin (used when args would exceed Windows 8191 limit).
+        """
+        import os
+        import sys
+        import tempfile
+
         cmd = [self._cli_path] + args
 
-        # Force UTF-8 encoding to handle emojis/unicode
         env = {
             **os.environ,
             "PYTHONIOENCODING": "utf-8",
             "LANG": "en_US.UTF-8",
         }
 
-        # Use create_subprocess_exec (never shell) to prevent command injection.
-        # On Windows, .cmd/.bat files require cmd.exe as the launcher — args are
-        # still passed as discrete list elements, never joined into a shell string.
+        stdin_pipe = asyncio.subprocess.PIPE if stdin_data else None
+
+        # Run from temp dir to prevent Claude CLI from
+        # loading project CLAUDE.md / memory files which
+        # pollute responses with Atlas platform details
+        cwd = tempfile.gettempdir()
+
+        # Use create_subprocess_exec (never shell).
+        # On Windows, .cmd/.bat need cmd.exe as launcher.
         cli = cmd[0]
         exec_args = cmd[1:]
         if sys.platform == "win32" and cli.lower().endswith((".cmd", ".bat")):
@@ -372,10 +556,13 @@ class ClaudeCLIProvider(LLMProvider):
             *exec_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            stdin=stdin_pipe,
             env=env,
+            cwd=cwd,
         )
         stdout, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=timeout,
+            proc.communicate(input=stdin_data),
+            timeout=timeout,
         )
         return (
             stdout.decode("utf-8", errors="replace").strip(),
@@ -387,7 +574,8 @@ class ClaudeCLIProvider(LLMProvider):
         """Check if Claude CLI is available and authenticated."""
         try:
             version, code, _ = await self._exec(
-                ["--version"], timeout=10,
+                ["--version"],
+                timeout=10,
             )
             if version and code == 0:
                 self._healthy = True

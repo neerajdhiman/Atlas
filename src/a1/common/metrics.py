@@ -4,12 +4,14 @@ time-series tracking, and request history for enterprise dashboard."""
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+
+from a1.common.tz import now_ist
 
 
 @dataclass
 class RequestRecord:
     """Single request record for live feed and history."""
+
     timestamp: str
     provider: str
     model: str
@@ -47,7 +49,9 @@ class Metrics:
     error_counts_by_provider: dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
     # Latency samples per model for percentile calculation (ring buffer)
-    _latency_samples: dict[str, deque] = field(default_factory=lambda: defaultdict(lambda: deque(maxlen=1000)))
+    _latency_samples: dict[str, deque] = field(
+        default_factory=lambda: defaultdict(lambda: deque(maxlen=1000))
+    )
     _start_time: float = field(default_factory=time.time)
 
     # Time-series: token usage per minute (last 24h = 1440 buckets)
@@ -61,18 +65,34 @@ class Metrics:
     _hourly_heatmap: dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
     # Model-level stats for leaderboard
-    _model_stats: dict[str, dict] = field(default_factory=lambda: defaultdict(
-        lambda: {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0,
-                 "total_latency": 0, "cost": 0.0, "errors": 0}))
+    _model_stats: dict[str, dict] = field(
+        default_factory=lambda: defaultdict(
+            lambda: {
+                "requests": 0,
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_latency": 0,
+                "cost": 0.0,
+                "errors": 0,
+            }
+        )
+    )
 
     # Reference cost for savings (gpt-4o-mini)
     _ref_cost_input: float = 0.00015
     _ref_cost_output: float = 0.0006
 
     def record_request(
-        self, provider: str, model: str, task_type: str | None,
-        latency_ms: int, cost_usd: float, prompt_tokens: int,
-        completion_tokens: int, error: bool = False, is_local: bool = False,
+        self,
+        provider: str,
+        model: str,
+        task_type: str | None,
+        latency_ms: int,
+        cost_usd: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+        error: bool = False,
+        is_local: bool = False,
     ):
         self.request_count += 1
         self.total_latency_ms += latency_ms
@@ -93,8 +113,10 @@ class Metrics:
             self.local_prompt_tokens += prompt_tokens
             self.local_completion_tokens += completion_tokens
             # Calculate savings
-            equiv_cost = (prompt_tokens / 1000 * self._ref_cost_input +
-                         completion_tokens / 1000 * self._ref_cost_output)
+            equiv_cost = (
+                prompt_tokens / 1000 * self._ref_cost_input
+                + completion_tokens / 1000 * self._ref_cost_output
+            )
             self.savings_usd += equiv_cost
         else:
             self.external_request_count += 1
@@ -106,19 +128,23 @@ class Metrics:
         self._latency_samples[model].append(latency_ms)
 
         # Time-series point
-        now = datetime.now(timezone.utc)
+        now = now_ist()
         ts_key = now.strftime("%Y-%m-%dT%H:%M")
-        self._token_timeseries.append({
-            "time": ts_key,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "is_local": is_local,
-        })
-        self._cost_timeseries.append({
-            "time": ts_key,
-            "cost": cost_usd,
-            "provider": provider,
-        })
+        self._token_timeseries.append(
+            {
+                "time": ts_key,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "is_local": is_local,
+            }
+        )
+        self._cost_timeseries.append(
+            {
+                "time": ts_key,
+                "cost": cost_usd,
+                "provider": provider,
+            }
+        )
 
         # Hourly heatmap (day_of_week:hour)
         heatmap_key = f"{now.weekday()}:{now.hour}"
@@ -135,14 +161,20 @@ class Metrics:
             ms["errors"] += 1
 
         # Request history for live feed
-        self._request_history.append(RequestRecord(
-            timestamp=now.isoformat(),
-            provider=provider, model=model,
-            task_type=task_type, latency_ms=latency_ms,
-            cost_usd=cost_usd, prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            is_local=is_local, error=error,
-        ))
+        self._request_history.append(
+            RequestRecord(
+                timestamp=now.isoformat(),
+                provider=provider,
+                model=model,
+                task_type=task_type,
+                latency_ms=latency_ms,
+                cost_usd=cost_usd,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                is_local=is_local,
+                error=error,
+            )
+        )
 
     def get_latency_percentiles(self, model: str) -> dict:
         samples = sorted(self._latency_samples.get(model, []))
@@ -191,6 +223,7 @@ class Metrics:
     def token_timeseries(self) -> list[dict]:
         """Aggregate token usage per minute for time-series charts."""
         from collections import OrderedDict
+
         buckets: dict[str, dict] = OrderedDict()
         for point in self._token_timeseries:
             t = point["time"]
@@ -207,6 +240,7 @@ class Metrics:
     def cost_timeseries(self) -> list[dict]:
         """Aggregate cost per minute for cost trend chart."""
         from collections import OrderedDict
+
         buckets: dict[str, dict] = OrderedDict()
         for point in self._cost_timeseries:
             t = point["time"]
@@ -222,11 +256,13 @@ class Metrics:
         for day_idx, day_name in enumerate(days):
             for hour in range(24):
                 key = f"{day_idx}:{hour}"
-                result.append({
-                    "day": day_name,
-                    "hour": hour,
-                    "count": self._hourly_heatmap.get(key, 0),
-                })
+                result.append(
+                    {
+                        "day": day_name,
+                        "hour": hour,
+                        "count": self._hourly_heatmap.get(key, 0),
+                    }
+                )
         return result
 
     def model_leaderboard(self) -> list[dict]:
@@ -236,22 +272,24 @@ class Metrics:
             if stats["requests"] == 0:
                 continue
             percs = self.get_latency_percentiles(model)
-            result.append({
-                "model": model,
-                "requests": stats["requests"],
-                "prompt_tokens": stats["prompt_tokens"],
-                "completion_tokens": stats["completion_tokens"],
-                "total_tokens": stats["prompt_tokens"] + stats["completion_tokens"],
-                "avg_latency_ms": round(stats["total_latency"] / stats["requests"], 1),
-                "p50_latency": percs["p50"],
-                "p95_latency": percs["p95"],
-                "cost_usd": round(stats["cost"], 6),
-                "errors": stats["errors"],
-                "error_rate": round(stats["errors"] / stats["requests"] * 100, 1),
-                "avg_tokens_per_request": round(
-                    (stats["prompt_tokens"] + stats["completion_tokens"]) / stats["requests"], 1
-                ),
-            })
+            result.append(
+                {
+                    "model": model,
+                    "requests": stats["requests"],
+                    "prompt_tokens": stats["prompt_tokens"],
+                    "completion_tokens": stats["completion_tokens"],
+                    "total_tokens": stats["prompt_tokens"] + stats["completion_tokens"],
+                    "avg_latency_ms": round(stats["total_latency"] / stats["requests"], 1),
+                    "p50_latency": percs["p50"],
+                    "p95_latency": percs["p95"],
+                    "cost_usd": round(stats["cost"], 6),
+                    "errors": stats["errors"],
+                    "error_rate": round(stats["errors"] / stats["requests"] * 100, 1),
+                    "avg_tokens_per_request": round(
+                        (stats["prompt_tokens"] + stats["completion_tokens"]) / stats["requests"], 1
+                    ),
+                }
+            )
         return sorted(result, key=lambda x: x["requests"], reverse=True)
 
     def recent_requests(self, limit: int = 50) -> list[dict]:

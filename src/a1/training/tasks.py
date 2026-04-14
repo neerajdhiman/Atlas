@@ -2,11 +2,11 @@
 
 import os
 import uuid
-from datetime import datetime
 
 from arq.connections import RedisSettings
 
 from a1.common.logging import get_logger
+from a1.common.tz import now_ist
 from a1.db.engine import async_session
 from a1.db.repositories import TrainingRepo
 from config.settings import settings
@@ -28,12 +28,12 @@ async def run_training_pipeline(ctx: dict, run_id: str) -> dict:
             if not run:
                 return {"error": "Training run not found"}
 
-            await repo.update_status(run_uuid, "running", started_at=datetime.utcnow())
+            await repo.update_status(run_uuid, "running", started_at=now_ist())
 
     try:
         # Step 1: Collect training samples
         log.info(f"[{run_id}] Collecting training samples...")
-        from a1.training.collector import collect_training_samples, collect_all_conversations
+        from a1.training.collector import collect_all_conversations, collect_training_samples
 
         async with async_session() as session:
             samples = await collect_training_samples(
@@ -53,7 +53,7 @@ async def run_training_pipeline(ctx: dict, run_id: str) -> dict:
         from a1.training.dataset import build_dataset
 
         dataset_dir = os.path.join(settings.training_output_dir, "datasets", run_id)
-        ds_info = build_dataset(samples, dataset_dir)
+        build_dataset(samples, dataset_dir)
 
         # Step 3: Train
         log.info(f"[{run_id}] Starting training...")
@@ -74,6 +74,7 @@ async def run_training_pipeline(ctx: dict, run_id: str) -> dict:
 
         if settings.use_harness_eval:
             from a1.training.harness_evaluator import run_harness_eval
+
             eval_results = run_harness_eval(
                 adapter_path=adapter_path,
                 base_model=base,
@@ -81,6 +82,7 @@ async def run_training_pipeline(ctx: dict, run_id: str) -> dict:
             )
         else:
             from a1.training.evaluator import evaluate_model
+
             eval_results = await evaluate_model(
                 adapter_path=adapter_path,
                 test_data_path=os.path.join(dataset_dir, "test.jsonl"),
@@ -103,8 +105,9 @@ async def run_training_pipeline(ctx: dict, run_id: str) -> dict:
             async with session.begin():
                 repo = TrainingRepo(session)
                 await repo.update_status(
-                    run_uuid, "completed",
-                    completed_at=datetime.utcnow(),
+                    run_uuid,
+                    "completed",
+                    completed_at=now_ist(),
                     metrics=eval_results,
                     artifact_path=adapter_path,
                     ollama_model=ollama_model,
@@ -119,7 +122,7 @@ async def run_training_pipeline(ctx: dict, run_id: str) -> dict:
         async with async_session() as session:
             async with session.begin():
                 repo = TrainingRepo(session)
-                await repo.update_status(run_uuid, "failed", completed_at=datetime.utcnow())
+                await repo.update_status(run_uuid, "failed", completed_at=now_ist())
         return {"status": "failed", "error": str(e)}
 
 

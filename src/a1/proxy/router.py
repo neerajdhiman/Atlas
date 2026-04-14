@@ -8,9 +8,9 @@ Sub-routers:
 
 from fastapi import APIRouter
 
+from a1.proxy.atlas_router import router as _atlas
 from a1.proxy.openai_router import router as _openai
 from a1.proxy.responses_router import router as _responses
-from a1.proxy.atlas_router import router as _atlas
 
 router = APIRouter(tags=["proxy"])
 router.include_router(_openai)

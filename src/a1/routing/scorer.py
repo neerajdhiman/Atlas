@@ -44,9 +44,7 @@ def get_cold_start_model(task_type: str) -> tuple[str, list[str]]:
     return model, fallbacks
 
 
-def score_candidates(
-    candidates: list[ModelCandidate], strategy: str
-) -> list[ModelCandidate]:
+def score_candidates(candidates: list[ModelCandidate], strategy: str) -> list[ModelCandidate]:
     """Rank candidates by the given strategy."""
     if strategy == "best_quality":
         return sorted(candidates, key=lambda c: c.avg_quality, reverse=True)

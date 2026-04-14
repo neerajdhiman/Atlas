@@ -98,6 +98,7 @@ def is_cacheable(stream: bool, tools: list | None) -> bool:
 # P1-7: TaskResponseCache — per-task-type TTL, exact content-hash key
 # ---------------------------------------------------------------------------
 
+
 class TaskResponseCache:
     """In-memory response cache keyed by content hash with per-task-type TTL.
 
@@ -110,16 +111,16 @@ class TaskResponseCache:
     """
 
     _TASK_TTL: dict[str, int] = {
-        "chat": 300,                  # 5 min
-        "general": 300,               # 5 min
-        "code": 1800,                 # 30 min
-        "structured_extraction": 3600, # 60 min
-        "analysis": 600,              # 10 min
-        "summarization": 1800,        # 30 min
-        "translation": 3600,          # 60 min
-        "math": 1800,                 # 30 min
-        "creative": 120,              # 2 min (creative answers should vary)
-        "infra": 1800,                # 30 min
+        "chat": 300,  # 5 min
+        "general": 300,  # 5 min
+        "code": 1800,  # 30 min
+        "structured_extraction": 3600,  # 60 min
+        "analysis": 600,  # 10 min
+        "summarization": 1800,  # 30 min
+        "translation": 3600,  # 60 min
+        "math": 1800,  # 30 min
+        "creative": 120,  # 2 min (creative answers should vary)
+        "infra": 1800,  # 30 min
     }
     _DEFAULT_TTL = 600  # 10 min
 

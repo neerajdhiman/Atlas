@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,14 +18,33 @@ from a1.db.models import (
 
 
 class ConversationRepo:
-    def __init__(self, session: AsyncSession):
+    def __init__(self, session: AsyncSession, workspace_id: str | None = None):
         self.session = session
+        self.workspace_id = workspace_id
 
-    async def create(self, source: str, user_id: str | None = None, external_id: str | None = None, metadata: dict | None = None) -> Conversation:
-        conv = Conversation(source=source, user_id=user_id, external_id=external_id, metadata_=metadata or {})
+    async def create(
+        self,
+        source: str,
+        user_id: str | None = None,
+        external_id: str | None = None,
+        metadata: dict | None = None,
+    ) -> Conversation:
+        conv = Conversation(
+            source=source,
+            user_id=user_id,
+            external_id=external_id,
+            metadata_=metadata or {},
+            workspace_id=uuid.UUID(self.workspace_id) if self.workspace_id else None,
+        )
         self.session.add(conv)
         await self.session.flush()
         return conv
+
+    def _apply_workspace_filter(self, stmt):
+        """Apply workspace scoping if a workspace_id was provided."""
+        if self.workspace_id:
+            stmt = stmt.where(Conversation.workspace_id == uuid.UUID(self.workspace_id))
+        return stmt
 
     async def get(self, conv_id: uuid.UUID) -> Conversation | None:
         stmt = (
@@ -34,6 +53,7 @@ class ConversationRepo:
             .options(selectinload(Conversation.messages).selectinload(Message.quality_signals))
             .where(Conversation.id == conv_id)
         )
+        stmt = self._apply_workspace_filter(stmt)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -47,13 +67,13 @@ class ConversationRepo:
         source: str | None = None,
     ) -> list[Conversation]:
         from datetime import datetime as _dt
+
         stmt = (
             select(Conversation)
-            .options(
-                selectinload(Conversation.messages).selectinload(Message.routing_decision)
-            )
+            .options(selectinload(Conversation.messages).selectinload(Message.routing_decision))
             .order_by(Conversation.created_at.desc())
         )
+        stmt = self._apply_workspace_filter(stmt)
         if search:
             stmt = stmt.where(Conversation.user_id.ilike(f"%{search}%"))
         if source:
@@ -74,7 +94,9 @@ class ConversationRepo:
         source: str | None = None,
     ) -> int:
         from datetime import datetime as _dt
+
         stmt = select(func.count(Conversation.id))
+        stmt = self._apply_workspace_filter(stmt)
         if search:
             stmt = stmt.where(Conversation.user_id.ilike(f"%{search}%"))
         if source:
@@ -91,10 +113,22 @@ class MessageRepo:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def add(self, conversation_id: uuid.UUID, role: str, content: str, sequence: int, tool_calls: dict | None = None, token_count: int | None = None) -> Message:
+    async def add(
+        self,
+        conversation_id: uuid.UUID,
+        role: str,
+        content: str,
+        sequence: int,
+        tool_calls: dict | None = None,
+        token_count: int | None = None,
+    ) -> Message:
         msg = Message(
-            conversation_id=conversation_id, role=role, content=content,
-            sequence=sequence, tool_calls=tool_calls, token_count=token_count,
+            conversation_id=conversation_id,
+            role=role,
+            content=content,
+            sequence=sequence,
+            tool_calls=tool_calls,
+            token_count=token_count,
         )
         self.session.add(msg)
         await self.session.flush()
@@ -105,13 +139,41 @@ class RoutingRepo:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def record(self, message_id: uuid.UUID, provider: str, model: str, strategy: str, task_type: str | None, confidence: float | None, latency_ms: int, prompt_tokens: int, completion_tokens: int, cost_usd: float, error: str | None = None, fallback_from: uuid.UUID | None = None, is_local: bool = False, api_key_hash: str | None = None, cache_hit: bool = False, account_id: uuid.UUID | None = None) -> RoutingDecision:
+    async def record(
+        self,
+        message_id: uuid.UUID,
+        provider: str,
+        model: str,
+        strategy: str,
+        task_type: str | None,
+        confidence: float | None,
+        latency_ms: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+        cost_usd: float,
+        error: str | None = None,
+        fallback_from: uuid.UUID | None = None,
+        is_local: bool = False,
+        api_key_hash: str | None = None,
+        cache_hit: bool = False,
+        account_id: uuid.UUID | None = None,
+    ) -> RoutingDecision:
         decision = RoutingDecision(
-            message_id=message_id, provider=provider, model=model, strategy=strategy,
-            task_type=task_type, confidence=confidence, latency_ms=latency_ms,
-            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-            cost_usd=cost_usd, error=error, fallback_from=fallback_from,
-            is_local=is_local, api_key_hash=api_key_hash, cache_hit=cache_hit,
+            message_id=message_id,
+            provider=provider,
+            model=model,
+            strategy=strategy,
+            task_type=task_type,
+            confidence=confidence,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=cost_usd,
+            error=error,
+            fallback_from=fallback_from,
+            is_local=is_local,
+            api_key_hash=api_key_hash,
+            cache_hit=cache_hit,
             account_id=account_id,
         )
         self.session.add(decision)
@@ -125,7 +187,6 @@ class RoutingRepo:
         date_to: str | None = None,
         task_type: str | None = None,
     ) -> list[RoutingDecision]:
-        from datetime import datetime, timezone
         stmt = select(RoutingDecision)
         if date_from:
             dt_from = datetime.fromisoformat(date_from.replace("Z", "+00:00"))
@@ -152,8 +213,12 @@ class QualityRepo:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def add_signal(self, message_id: uuid.UUID, signal_type: str, value: float, evaluator: str | None = None) -> QualitySignal:
-        signal = QualitySignal(message_id=message_id, signal_type=signal_type, value=value, evaluator=evaluator)
+    async def add_signal(
+        self, message_id: uuid.UUID, signal_type: str, value: float, evaluator: str | None = None
+    ) -> QualitySignal:
+        signal = QualitySignal(
+            message_id=message_id, signal_type=signal_type, value=value, evaluator=evaluator
+        )
         self.session.add(signal)
         await self.session.flush()
         return signal
@@ -205,20 +270,26 @@ class DualExecutionRepo:
         result = await self.session.execute(stmt)
         return result.scalar() or 0
 
-    async def get_recent(self, task_type: str | None = None, limit: int = 50) -> list[DualExecutionRecord]:
-        stmt = select(DualExecutionRecord).order_by(DualExecutionRecord.created_at.desc()).limit(limit)
+    async def get_recent(
+        self, task_type: str | None = None, limit: int = 50
+    ) -> list[DualExecutionRecord]:
+        stmt = (
+            select(DualExecutionRecord).order_by(DualExecutionRecord.created_at.desc()).limit(limit)
+        )
         if task_type:
             stmt = stmt.where(DualExecutionRecord.task_type == task_type)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_unused_for_training(self, task_type: str, min_quality: float = 0.7, limit: int = 10000) -> list[DualExecutionRecord]:
+    async def get_unused_for_training(
+        self, task_type: str, min_quality: float = 0.7, limit: int = 10000
+    ) -> list[DualExecutionRecord]:
         stmt = (
             select(DualExecutionRecord)
             .where(
                 DualExecutionRecord.task_type == task_type,
-                DualExecutionRecord.similarity_score != None,
-                DualExecutionRecord.used_for_training == False,
+                DualExecutionRecord.similarity_score.isnot(None),
+                DualExecutionRecord.used_for_training.is_(False),
             )
             .order_by(DualExecutionRecord.created_at.desc())
             .limit(limit)
@@ -241,7 +312,9 @@ class TaskTypeReadinessRepo:
             await self.session.flush()
         return record
 
-    async def update_handoff(self, task_type: str, handoff_pct: float, best_model: str | None = None) -> None:
+    async def update_handoff(
+        self, task_type: str, handoff_pct: float, best_model: str | None = None
+    ) -> None:
         record = await self.get_or_create(task_type)
         record.local_handoff_pct = handoff_pct
         if best_model:

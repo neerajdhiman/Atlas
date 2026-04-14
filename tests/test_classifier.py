@@ -1,6 +1,5 @@
 """Unit tests for task type classifier — covers all 12 decision branches."""
 
-import pytest
 from a1.proxy.request_models import ChatCompletionRequest, MessageInput
 from a1.routing.classifier import classify_task
 
@@ -65,7 +64,9 @@ def test_translation():
 
 # Branch 7: has_summarization_cues → summarization
 def test_summarization():
-    task, conf = classify_task(req("Summarize this article: The quick brown fox jumps over the lazy dog"))
+    task, conf = classify_task(
+        req("Summarize this article: The quick brown fox jumps over the lazy dog")
+    )
     assert task == "summarization"
 
 

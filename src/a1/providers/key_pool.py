@@ -7,14 +7,12 @@ with round-robin, least-used, priority, and budget-aware strategies.
 import asyncio
 import time
 import uuid
-from datetime import datetime
-from typing import Optional
 
 from cryptography.fernet import Fernet
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from a1.common.logging import get_logger
+from a1.common.tz import now_ist
 from a1.db.engine import async_session
 from a1.db.models import ProviderAccount
 from config.settings import settings
@@ -28,7 +26,11 @@ class KeyPoolError(Exception):
 
 def _get_fernet() -> Fernet | None:
     if settings.encryption_key:
-        return Fernet(settings.encryption_key.encode() if isinstance(settings.encryption_key, str) else settings.encryption_key)
+        return Fernet(
+            settings.encryption_key.encode()
+            if isinstance(settings.encryption_key, str)
+            else settings.encryption_key
+        )
     return None
 
 
@@ -62,7 +64,11 @@ class KeyPool:
     async def load_accounts(self):
         """Load all active provider accounts from DB."""
         async with async_session() as session:
-            stmt = select(ProviderAccount).where(ProviderAccount.is_active == True).order_by(ProviderAccount.priority.desc())
+            stmt = (
+                select(ProviderAccount)
+                .where(ProviderAccount.is_active.is_(True))
+                .order_by(ProviderAccount.priority.desc())
+            )
             result = await session.execute(stmt)
             accounts = list(result.scalars().all())
 
@@ -93,10 +99,7 @@ class KeyPool:
         now = time.time()
 
         # Filter out temporarily disabled accounts
-        available = [
-            a for a in accounts
-            if self._disabled_until.get(str(a.id), 0) < now
-        ]
+        available = [a for a in accounts if self._disabled_until.get(str(a.id), 0) < now]
 
         if not available:
             # All disabled — try the one with earliest re-enable
@@ -119,14 +122,16 @@ class KeyPool:
         api_key = decrypt_key(account.api_key_encrypted)
         return api_key, account.id, account.name
 
-    def _select_round_robin(self, provider: str, accounts: list[ProviderAccount]) -> ProviderAccount:
+    def _select_round_robin(
+        self, provider: str, accounts: list[ProviderAccount]
+    ) -> ProviderAccount:
         idx = self._round_robin_idx.get(provider, 0) % len(accounts)
         self._round_robin_idx[provider] = idx + 1
         return accounts[idx]
 
     def _select_least_used(self, provider: str, accounts: list[ProviderAccount]) -> ProviderAccount:
         now = time.time()
-        min_rpm = float('inf')
+        min_rpm = float("inf")
         best = accounts[0]
         for acc in accounts:
             acc_id = str(acc.id)
@@ -146,7 +151,10 @@ class KeyPool:
             if float(acc.current_month_cost_usd) < float(acc.monthly_budget_usd):
                 return acc
         # All over budget — use the one with most remaining budget
-        return max(accounts, key=lambda a: float(a.monthly_budget_usd or 0) - float(a.current_month_cost_usd))
+        return max(
+            accounts,
+            key=lambda a: float(a.monthly_budget_usd or 0) - float(a.current_month_cost_usd),
+        )
 
     async def report_usage(self, account_id: uuid.UUID, tokens: int, cost: float):
         """Report successful usage for an account."""
@@ -167,7 +175,7 @@ class KeyPool:
                             total_requests=ProviderAccount.total_requests + 1,
                             total_tokens=ProviderAccount.total_tokens + tokens,
                             current_month_cost_usd=ProviderAccount.current_month_cost_usd + cost,
-                            last_used_at=datetime.utcnow(),
+                            last_used_at=now_ist(),
                             last_error=None,
                         )
                     )

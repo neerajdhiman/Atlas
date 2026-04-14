@@ -64,10 +64,12 @@ class OpenAIProvider(LLMProvider):
         return ChatCompletionResponse(
             id=response.id,
             model=response.model,
-            choices=[Choice(
-                message=ChoiceMessage(content=choice.message.content, tool_calls=tool_calls),
-                finish_reason=choice.finish_reason,
-            )],
+            choices=[
+                Choice(
+                    message=ChoiceMessage(content=choice.message.content, tool_calls=tool_calls),
+                    finish_reason=choice.finish_reason,
+                )
+            ],
             usage=Usage(
                 prompt_tokens=response.usage.prompt_tokens,
                 completion_tokens=response.usage.completion_tokens,
@@ -89,13 +91,15 @@ class OpenAIProvider(LLMProvider):
             yield ChatCompletionChunk(
                 id=chunk.id or chunk_id,
                 model=chunk.model or request.model,
-                choices=[StreamChoice(
-                    delta=DeltaMessage(
-                        role=delta.role,
-                        content=delta.content,
-                    ),
-                    finish_reason=chunk.choices[0].finish_reason,
-                )],
+                choices=[
+                    StreamChoice(
+                        delta=DeltaMessage(
+                            role=delta.role,
+                            content=delta.content,
+                        ),
+                        finish_reason=chunk.choices[0].finish_reason,
+                    )
+                ],
             )
 
     async def health_check(self) -> bool:

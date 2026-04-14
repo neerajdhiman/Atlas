@@ -23,15 +23,23 @@ _CLASSIFIER_PROMPT = (
 
 
 TASK_TYPES = [
-    "code", "chat", "analysis", "creative", "summarization",
-    "translation", "math", "structured_extraction", "general", "infra",
+    "code",
+    "chat",
+    "analysis",
+    "creative",
+    "summarization",
+    "translation",
+    "math",
+    "structured_extraction",
+    "general",
+    "infra",
 ]
 
 # P1: Security/data analysis keyword pattern — triggers analysis regardless of message length
 SECURITY_ANALYSIS_PATTERNS = re.compile(
-    r'vulnerability|CVE-\d|threat\s+model|audit|anomaly|dataset\b|data\s+leak|'
-    r'pentest|sql\s+injection|xss|csrf|attack\s+surface|compliance\b|'
-    r'intrusion|malware|exploit|breach|incident\s+response',
+    r"vulnerability|CVE-\d|threat\s+model|audit|anomaly|dataset\b|data\s+leak|"
+    r"pentest|sql\s+injection|xss|csrf|attack\s+surface|compliance\b|"
+    r"intrusion|malware|exploit|breach|incident\s+response",
     re.IGNORECASE,
 )
 
@@ -42,16 +50,18 @@ def _feature_confidence(features: RequestFeatures) -> float:
     Counts how many signal features are active and normalises to [0.4, 0.95].
     Replaces hardcoded constants so stored confidence values reflect real input signals.
     """
-    active = sum([
-        features.has_code_markers,
-        features.has_tools,
-        features.has_math_markers,
-        features.has_translation_cues,
-        features.has_summarization_cues,
-        features.has_structured_output_cues,
-        features.has_question_markers,
-        features.has_system_prompt,
-    ])
+    active = sum(
+        [
+            features.has_code_markers,
+            features.has_tools,
+            features.has_math_markers,
+            features.has_translation_cues,
+            features.has_summarization_cues,
+            features.has_structured_output_cues,
+            features.has_question_markers,
+            features.has_system_prompt,
+        ]
+    )
     total = 8
     # Scale: 0 active features → 0.4, all active → 0.95
     return round(0.4 + 0.55 * (active / total), 3)
@@ -67,6 +77,7 @@ async def _llm_classify(text: str) -> str | None:
 
     try:
         import httpx
+
         from config.settings import settings
 
         prompt = _CLASSIFIER_PROMPT.format(text=text[:600])
@@ -76,8 +87,11 @@ async def _llm_classify(text: str) -> str | None:
             "stream": False,
             "options": {"temperature": 0, "num_predict": 10},
         }
-        base = (settings.ollama_servers[0].rstrip("/")
-                if settings.ollama_servers else "http://10.0.0.9:11434")
+        base = (
+            settings.ollama_servers[0].rstrip("/")
+            if settings.ollama_servers
+            else "http://10.0.0.9:11434"
+        )
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(f"{base}/api/generate", json=payload)
             resp.raise_for_status()

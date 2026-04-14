@@ -26,6 +26,7 @@ _REDIS_RESP_PREFIX = "a1:resp:"
 @dataclass
 class SessionMessage:
     """A single message in a session."""
+
     role: str
     content: str
     timestamp: float = field(default_factory=time.time)
@@ -35,6 +36,7 @@ class SessionMessage:
 @dataclass
 class Session:
     """Active conversation session."""
+
     id: str
     user_id: str | None = None
     messages: list[SessionMessage] = field(default_factory=list)
@@ -43,9 +45,13 @@ class Session:
     metadata: dict = field(default_factory=dict)
 
     def add_message(self, role: str, content: str, response_id: str | None = None):
-        self.messages.append(SessionMessage(
-            role=role, content=content, response_id=response_id,
-        ))
+        self.messages.append(
+            SessionMessage(
+                role=role,
+                content=content,
+                response_id=response_id,
+            )
+        )
         self.last_activity = time.time()
 
     def get_history(self, limit: int = 20) -> list[dict]:
@@ -61,8 +67,12 @@ class Session:
             "id": self.id,
             "user_id": self.user_id,
             "messages": [
-                {"role": m.role, "content": m.content, "timestamp": m.timestamp,
-                 "response_id": m.response_id}
+                {
+                    "role": m.role,
+                    "content": m.content,
+                    "timestamp": m.timestamp,
+                    "response_id": m.response_id,
+                }
                 for m in self.messages
             ],
             "created_at": self.created_at,
@@ -80,12 +90,14 @@ class Session:
             metadata=data.get("metadata", {}),
         )
         for m in data.get("messages", []):
-            s.messages.append(SessionMessage(
-                role=m["role"],
-                content=m["content"],
-                timestamp=m.get("timestamp", s.created_at),
-                response_id=m.get("response_id"),
-            ))
+            s.messages.append(
+                SessionMessage(
+                    role=m["role"],
+                    content=m["content"],
+                    timestamp=m.get("timestamp", s.created_at),
+                    response_id=m.get("response_id"),
+                )
+            )
         return s
 
 
@@ -106,8 +118,11 @@ class RedisSessionBackend:
         """Connect to Redis and verify availability."""
         try:
             import redis.asyncio as aioredis
+
             self._client = aioredis.from_url(
-                self._redis_url, decode_responses=True, socket_connect_timeout=2,
+                self._redis_url,
+                decode_responses=True,
+                socket_connect_timeout=2,
             )
             await self._client.ping()
             self.available = True
@@ -150,9 +165,7 @@ class RedisSessionBackend:
         if not self.available or not self._client:
             return
         try:
-            await self._client.setex(
-                f"{_REDIS_RESP_PREFIX}{response_id}", self._ttl, session_id
-            )
+            await self._client.setex(f"{_REDIS_RESP_PREFIX}{response_id}", self._ttl, session_id)
         except Exception as e:
             log.warning(f"Redis resp link failed for {response_id}: {e}")
 
@@ -258,7 +271,7 @@ class SessionManager:
         # Keep map bounded
         if len(self._response_to_session) > self.max_sessions * 10:
             keys = list(self._response_to_session.keys())
-            for k in keys[:len(keys) // 2]:
+            for k in keys[: len(keys) // 2]:
                 del self._response_to_session[k]
         if self._redis:
             asyncio.create_task(self._redis.link_response(response_id, session_id))
@@ -287,10 +300,7 @@ class SessionManager:
 
     def _cleanup_expired(self):
         """Remove expired sessions from memory."""
-        expired = [
-            sid for sid, s in self._sessions.items()
-            if s.is_expired(self.ttl_seconds)
-        ]
+        expired = [sid for sid, s in self._sessions.items() if s.is_expired(self.ttl_seconds)]
         for sid in expired:
             del self._sessions[sid]
             log.debug(f"Session expired: {sid[:8]}...")

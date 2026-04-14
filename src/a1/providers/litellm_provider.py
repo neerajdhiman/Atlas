@@ -76,10 +76,7 @@ class LiteLLMProvider(LLMProvider):
 
     def _build_kwargs(self, request: ChatCompletionRequest) -> dict:
         """Build kwargs for litellm.acompletion()."""
-        messages = [
-            {"role": m.role, "content": m.content or ""}
-            for m in request.messages
-        ]
+        messages = [{"role": m.role, "content": m.content or ""} for m in request.messages]
 
         kwargs: dict = {
             "model": self._litellm_model(request.model),
@@ -126,13 +123,15 @@ class LiteLLMProvider(LLMProvider):
         return ChatCompletionResponse(
             id=response.id or f"chatcmpl-{uuid.uuid4().hex[:12]}",
             model=request.model,
-            choices=[Choice(
-                message=ChoiceMessage(
-                    content=choice.message.content,
-                    tool_calls=tool_calls,
-                ),
-                finish_reason=choice.finish_reason,
-            )],
+            choices=[
+                Choice(
+                    message=ChoiceMessage(
+                        content=choice.message.content,
+                        tool_calls=tool_calls,
+                    ),
+                    finish_reason=choice.finish_reason,
+                )
+            ],
             usage=Usage(
                 prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
                 completion_tokens=response.usage.completion_tokens if response.usage else 0,
@@ -156,13 +155,15 @@ class LiteLLMProvider(LLMProvider):
             yield ChatCompletionChunk(
                 id=chunk.id or chunk_id,
                 model=request.model,
-                choices=[StreamChoice(
-                    delta=DeltaMessage(
-                        role=getattr(delta, "role", None),
-                        content=getattr(delta, "content", None),
-                    ),
-                    finish_reason=chunk.choices[0].finish_reason,
-                )],
+                choices=[
+                    StreamChoice(
+                        delta=DeltaMessage(
+                            role=getattr(delta, "role", None),
+                            content=getattr(delta, "content", None),
+                        ),
+                        finish_reason=chunk.choices[0].finish_reason,
+                    )
+                ],
             )
 
     async def health_check(self) -> bool:

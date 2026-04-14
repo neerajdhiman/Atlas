@@ -19,7 +19,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def get_redis() -> redis.Redis:
     global _redis
     if _redis is None:
-        _redis = redis.from_url(settings.redis_url, decode_responses=True)
+        _redis = redis.from_url(
+            settings.redis_url,
+            decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
     return _redis
 
 
@@ -28,7 +33,11 @@ async def init_arq_pool():
     global _arq_pool
     from arq import create_pool
     from arq.connections import RedisSettings
-    _arq_pool = await create_pool(RedisSettings.from_dsn(settings.redis_url))
+
+    rs = RedisSettings.from_dsn(settings.redis_url)
+    rs.conn_timeout = 2
+    rs.conn_retries = 1
+    _arq_pool = await create_pool(rs)
     return _arq_pool
 
 

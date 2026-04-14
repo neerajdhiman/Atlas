@@ -84,7 +84,10 @@ class OllamaProvider(LLMProvider):
                             self._model_to_server[model_name] = server
 
                     server.healthy = True
-                    log.info(f"Ollama server {url}: discovered {len(server.models)} models — {[m.name for m in server.models]}")
+                    log.info(
+                        f"Ollama server {url}: discovered {len(server.models)} models "
+                        f"— {[m.name for m in server.models]}"
+                    )
 
             except Exception as e:
                 server.healthy = False
@@ -108,7 +111,9 @@ class OllamaProvider(LLMProvider):
                 return httpx.AsyncClient(base_url=s.url, timeout=300.0), s.url
 
         # Fallback to primary
-        return httpx.AsyncClient(base_url=settings.ollama_base_url, timeout=300.0), settings.ollama_base_url
+        return httpx.AsyncClient(
+            base_url=settings.ollama_base_url, timeout=300.0
+        ), settings.ollama_base_url
 
     def get_server_for_model(self, model: str) -> str:
         """Get the server URL for a model (for display/logging)."""
@@ -153,7 +158,8 @@ class OllamaProvider(LLMProvider):
         chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
         yield ChatCompletionChunk(
-            id=chunk_id, model=model,
+            id=chunk_id,
+            model=model,
             choices=[StreamChoice(delta=DeltaMessage(role="assistant"))],
         )
 
@@ -166,19 +172,22 @@ class OllamaProvider(LLMProvider):
                     if data.get("done"):
                         # Final chunk with usage data from Ollama
                         yield ChatCompletionChunk(
-                            id=chunk_id, model=model,
+                            id=chunk_id,
+                            model=model,
                             choices=[StreamChoice(delta=DeltaMessage(), finish_reason="stop")],
                             usage=Usage(
                                 prompt_tokens=data.get("prompt_eval_count", 0),
                                 completion_tokens=data.get("eval_count", 0),
-                                total_tokens=data.get("prompt_eval_count", 0) + data.get("eval_count", 0),
+                                total_tokens=data.get("prompt_eval_count", 0)
+                                + data.get("eval_count", 0),
                             ),
                         )
                         break
                     content = data.get("message", {}).get("content", "")
                     if content:
                         yield ChatCompletionChunk(
-                            id=chunk_id, model=model,
+                            id=chunk_id,
+                            model=model,
                             choices=[StreamChoice(delta=DeltaMessage(content=content))],
                         )
 

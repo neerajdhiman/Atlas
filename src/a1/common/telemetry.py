@@ -21,27 +21,37 @@ _initialized = False
 
 def setup_telemetry(app, settings) -> None:
     """Initialize OpenTelemetry tracing and metrics. No-op if otlp_endpoint is empty."""
-    global tracer, request_counter, request_duration, token_counter, cost_counter, error_counter, _initialized
+    global \
+        tracer, \
+        request_counter, \
+        request_duration, \
+        token_counter, \
+        cost_counter, \
+        error_counter, \
+        _initialized
 
     if not settings.otlp_endpoint or _initialized:
         log.info("OpenTelemetry disabled (no otlp_endpoint configured)")
         return
 
     try:
-        from opentelemetry import trace, metrics as otel_metrics
+        from opentelemetry import metrics as otel_metrics
+        from opentelemetry import trace
+        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        from opentelemetry.sdk.metrics import MeterProvider
+        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.resources import Resource
         from opentelemetry.sdk.trace import TracerProvider
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-        from opentelemetry.sdk.metrics import MeterProvider
-        from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
-        from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-        from opentelemetry.sdk.resources import Resource
 
-        resource = Resource.create({
-            "service.name": "a1-trainer",
-            "service.version": "0.1.0",
-        })
+        resource = Resource.create(
+            {
+                "service.name": "a1-trainer",
+                "service.version": "0.1.0",
+            }
+        )
 
         # Traces
         tracer_provider = TracerProvider(resource=resource)
@@ -69,12 +79,8 @@ def setup_telemetry(app, settings) -> None:
         token_counter = meter.create_counter(
             "a1.tokens.total", description="Total tokens processed"
         )
-        cost_counter = meter.create_counter(
-            "a1.cost.usd", description="Total cost in USD"
-        )
-        error_counter = meter.create_counter(
-            "a1.errors.total", description="Total errors"
-        )
+        cost_counter = meter.create_counter("a1.cost.usd", description="Total cost in USD")
+        error_counter = meter.create_counter("a1.errors.total", description="Total errors")
 
         # Auto-instrument FastAPI
         FastAPIInstrumentor.instrument_app(app)
@@ -89,9 +95,13 @@ def setup_telemetry(app, settings) -> None:
 
 
 def record_otel_request(
-    provider: str, model: str, task_type: str | None,
-    latency_ms: int, cost_usd: float,
-    prompt_tokens: int, completion_tokens: int,
+    provider: str,
+    model: str,
+    task_type: str | None,
+    latency_ms: int,
+    cost_usd: float,
+    prompt_tokens: int,
+    completion_tokens: int,
     error: bool = False,
 ):
     """Record OTLP metrics for a request. No-op if not initialized."""

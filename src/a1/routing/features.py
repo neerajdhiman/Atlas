@@ -23,14 +23,27 @@ class RequestFeatures:
 
 
 CODE_PATTERNS = re.compile(
-    r'```|def\s+\w+|function\s+\w+|class\s+\w+|import\s+\w+|from\s+\w+|#include|'
-    r'console\.log|System\.out|print\(|return\s+|if\s*\(|for\s*\(|while\s*\('
+    r"```|def\s+\w+|function\s+\w+|class\s+\w+|import\s+\w+|from\s+\w+|#include|"
+    r"console\.log|System\.out|print\(|return\s+|if\s*\(|for\s*\(|while\s*\("
 )
-QUESTION_PATTERNS = re.compile(r'\?\s*$|^(what|how|why|when|where|who|which|can|could|should|is|are|do|does)\b', re.IGNORECASE | re.MULTILINE)
-TRANSLATION_CUES = re.compile(r'translat|convert.*language|in (english|spanish|french|german|chinese|japanese|korean|hindi)', re.IGNORECASE)
-SUMMARIZATION_CUES = re.compile(r'summar|tl;?dr|brief|condense|key points|overview of', re.IGNORECASE)
-MATH_PATTERNS = re.compile(r'calculat|equation|formula|integral|derivative|solve|matrix|algebra|statistic|probability|\d+\s*[\+\-\*\/\^]\s*\d+', re.IGNORECASE)
-STRUCTURED_CUES = re.compile(r'json|xml|csv|yaml|schema|structured|format.*output|extract.*from', re.IGNORECASE)
+QUESTION_PATTERNS = re.compile(
+    r"\?\s*$|^(what|how|why|when|where|who|which|can|could|should|is|are|do|does)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+TRANSLATION_CUES = re.compile(
+    r"translat|convert.*language|in (english|spanish|french|german|chinese|japanese|korean|hindi)",
+    re.IGNORECASE,
+)
+SUMMARIZATION_CUES = re.compile(
+    r"summar|tl;?dr|brief|condense|key points|overview of", re.IGNORECASE
+)
+MATH_PATTERNS = re.compile(
+    r"calculat|equation|formula|integral|derivative|solve|matrix|algebra|statistic|probability|\d+\s*[\+\-\*\/\^]\s*\d+",
+    re.IGNORECASE,
+)
+STRUCTURED_CUES = re.compile(
+    r"json|xml|csv|yaml|schema|structured|format.*output|extract.*from", re.IGNORECASE
+)
 
 
 def _token_bucket(count: int) -> str:

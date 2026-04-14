@@ -40,16 +40,23 @@ async def run_training(
 
 
 async def _train_unsloth(
-    dataset_dir: str, base_model: str, lora_rank: int,
-    epochs: int, batch_size: int, learning_rate: float, output_dir: str,
+    dataset_dir: str,
+    base_model: str,
+    lora_rank: int,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    output_dir: str,
 ) -> str:
     """Unsloth-backed training (2-5x faster, lower VRAM)."""
-    log.info(f"Starting Unsloth QLoRA training: base={base_model}, rank={lora_rank}, epochs={epochs}")
+    log.info(
+        f"Starting Unsloth QLoRA training: base={base_model}, rank={lora_rank}, epochs={epochs}"
+    )
 
     from datasets import load_dataset
-    from unsloth import FastLanguageModel
-    from trl import SFTTrainer
     from transformers import TrainingArguments
+    from trl import SFTTrainer
+    from unsloth import FastLanguageModel
 
     # Load model + tokenizer via Unsloth (handles quantization automatically)
     model, tokenizer = FastLanguageModel.from_pretrained(
@@ -65,12 +72,22 @@ async def _train_unsloth(
         r=lora_rank,
         lora_alpha=lora_rank * 2,
         lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
         use_gradient_checkpointing="unsloth",  # Unsloth's optimized checkpointing
     )
 
     # Load + format dataset (same as legacy)
-    train_ds = load_dataset("json", data_files=os.path.join(dataset_dir, "train.jsonl"), split="train")
+    train_ds = load_dataset(
+        "json", data_files=os.path.join(dataset_dir, "train.jsonl"), split="train"
+    )
     val_ds = load_dataset("json", data_files=os.path.join(dataset_dir, "val.jsonl"), split="train")
 
     def format_chat(example):
@@ -117,11 +134,18 @@ async def _train_unsloth(
 
 
 async def _train_hf_legacy(
-    dataset_dir: str, base_model: str, lora_rank: int,
-    epochs: int, batch_size: int, learning_rate: float, output_dir: str,
+    dataset_dir: str,
+    base_model: str,
+    lora_rank: int,
+    epochs: int,
+    batch_size: int,
+    learning_rate: float,
+    output_dir: str,
 ) -> str:
     """Legacy HuggingFace manual QLoRA training."""
-    log.info(f"Starting HF legacy QLoRA training: base={base_model}, rank={lora_rank}, epochs={epochs}")
+    log.info(
+        f"Starting HF legacy QLoRA training: base={base_model}, rank={lora_rank}, epochs={epochs}"
+    )
 
     import torch
     from datasets import load_dataset
@@ -146,7 +170,10 @@ async def _train_hf_legacy(
     )
 
     model = AutoModelForCausalLM.from_pretrained(
-        base_model, quantization_config=bnb_config, device_map="auto", trust_remote_code=True,
+        base_model,
+        quantization_config=bnb_config,
+        device_map="auto",
+        trust_remote_code=True,
     )
     model = prepare_model_for_kbit_training(model)
 
@@ -155,10 +182,20 @@ async def _train_hf_legacy(
         r=lora_rank,
         lora_alpha=lora_rank * 2,
         lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
     )
 
-    train_ds = load_dataset("json", data_files=os.path.join(dataset_dir, "train.jsonl"), split="train")
+    train_ds = load_dataset(
+        "json", data_files=os.path.join(dataset_dir, "train.jsonl"), split="train"
+    )
     val_ds = load_dataset("json", data_files=os.path.join(dataset_dir, "val.jsonl"), split="train")
 
     def format_chat(example):

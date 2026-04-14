@@ -63,27 +63,31 @@ class OpenClawProvider(LLMProvider):
                     for m in data.get("models", []):
                         model_name = m["name"]
                         details = m.get("details", {})
-                        self._models.append(ModelInfo(
-                            name=f"openclaw/{model_name}",
-                            provider="openclaw",
-                            context_window=details.get("context_length", 4096),
-                            cost_per_1k_input=0.0,
-                            cost_per_1k_output=0.0,
-                            supports_tools=True,
-                            supports_streaming=True,
-                        ))
+                        self._models.append(
+                            ModelInfo(
+                                name=f"openclaw/{model_name}",
+                                provider="openclaw",
+                                context_window=details.get("context_length", 4096),
+                                cost_per_1k_input=0.0,
+                                cost_per_1k_output=0.0,
+                                supports_tools=True,
+                                supports_streaming=True,
+                            )
+                        )
 
             # Always add the Alpheric-1 virtual model
             if not any(m.name == "alpheric-1" for m in self._models):
-                self._models.append(ModelInfo(
-                    name="alpheric-1",
-                    provider="openclaw",
-                    context_window=128000,
-                    cost_per_1k_input=0.0,
-                    cost_per_1k_output=0.0,
-                    supports_tools=True,
-                    supports_streaming=True,
-                ))
+                self._models.append(
+                    ModelInfo(
+                        name="alpheric-1",
+                        provider="openclaw",
+                        context_window=128000,
+                        cost_per_1k_input=0.0,
+                        cost_per_1k_output=0.0,
+                        supports_tools=True,
+                        supports_streaming=True,
+                    )
+                )
 
             self._healthy = True
             log.info(f"OpenClaw: discovered {len(self._models)} models at {self._base_url}")
@@ -156,9 +160,13 @@ class OpenClawProvider(LLMProvider):
             usage_data = data.get("usage", {})
             return ChatCompletionResponse(
                 model=request.model,
-                choices=[Choice(message=ChoiceMessage(
-                    content=choice.get("message", {}).get("content", ""),
-                ))],
+                choices=[
+                    Choice(
+                        message=ChoiceMessage(
+                            content=choice.get("message", {}).get("content", ""),
+                        )
+                    )
+                ],
                 usage=Usage(
                     prompt_tokens=usage_data.get("prompt_tokens", 0),
                     completion_tokens=usage_data.get("completion_tokens", 0),
@@ -174,15 +182,11 @@ class OpenClawProvider(LLMProvider):
 
         actual_model = model.removeprefix("openclaw/")
         messages = [{"role": m.role, "content": m.content or ""} for m in request.messages]
-        payload = {
-            "model": actual_model,
-            "messages": messages,
-            "stream": True,
-        }
         chunk_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
 
         yield ChatCompletionChunk(
-            id=chunk_id, model=request.model,
+            id=chunk_id,
+            model=request.model,
             choices=[StreamChoice(delta=DeltaMessage(role="assistant"))],
         )
 
@@ -209,12 +213,14 @@ class OpenClawProvider(LLMProvider):
 
                     if data.get("done"):
                         yield ChatCompletionChunk(
-                            id=chunk_id, model=request.model,
+                            id=chunk_id,
+                            model=request.model,
                             choices=[StreamChoice(delta=DeltaMessage(), finish_reason="stop")],
                             usage=Usage(
                                 prompt_tokens=data.get("prompt_eval_count", 0),
                                 completion_tokens=data.get("eval_count", 0),
-                                total_tokens=data.get("prompt_eval_count", 0) + data.get("eval_count", 0),
+                                total_tokens=data.get("prompt_eval_count", 0)
+                                + data.get("eval_count", 0),
                             ),
                         )
                         break
@@ -222,7 +228,8 @@ class OpenClawProvider(LLMProvider):
                     content = data.get("message", {}).get("content", "")
                     if content:
                         yield ChatCompletionChunk(
-                            id=chunk_id, model=request.model,
+                            id=chunk_id,
+                            model=request.model,
                             choices=[StreamChoice(delta=DeltaMessage(content=content))],
                         )
 

@@ -26,13 +26,31 @@ TASK_TO_ATLAS: dict[str, str] = {
 
 # Full routing metadata per Atlas model — used by /atlas endpoint and /atlas/models
 ATLAS_TASK_ROUTING: dict[str, dict] = {
-    "atlas-plan": {"tasks": ["chat", "general", "creative"], "description": "Planning, discussion, brainstorming"},
-    "atlas-code": {"tasks": ["code", "structured_extraction"], "description": "Code generation, debugging, review"},
-    "atlas-secure": {"tasks": ["analysis", "math"], "description": "Security analysis, reasoning, auditing"},
+    "atlas-plan": {
+        "tasks": ["chat", "general", "creative"],
+        "description": "Planning, discussion, brainstorming",
+    },
+    "atlas-code": {
+        "tasks": ["code", "structured_extraction"],
+        "description": "Code generation, debugging, review",
+    },
+    "atlas-secure": {
+        "tasks": ["analysis", "math"],
+        "description": "Security analysis, reasoning, auditing",
+    },
     "atlas-infra": {"tasks": ["infra"], "description": "Infrastructure, DevOps, deployment"},
-    "atlas-data": {"tasks": ["analysis", "summarization", "math"], "description": "Data analysis, statistics, ETL"},
-    "atlas-books": {"tasks": ["creative", "summarization", "translation"], "description": "Documentation, writing, research"},
-    "atlas-audit": {"tasks": ["structured_extraction", "analysis"], "description": "Compliance auditing, log analysis"},
+    "atlas-data": {
+        "tasks": ["analysis", "summarization", "math"],
+        "description": "Data analysis, statistics, ETL",
+    },
+    "atlas-books": {
+        "tasks": ["creative", "summarization", "translation"],
+        "description": "Documentation, writing, research",
+    },
+    "atlas-audit": {
+        "tasks": ["structured_extraction", "analysis"],
+        "description": "Compliance auditing, log analysis",
+    },
 }
 
 

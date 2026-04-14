@@ -61,38 +61,47 @@ async def sse_responses_stream_live(
         nonlocal full_text, usage
 
         # 1. response.created
-        yield _sse_event("response.created", {
-            "type": "response.created",
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "status": "in_progress",
-                "model": model,
-                "output": [],
+        yield _sse_event(
+            "response.created",
+            {
+                "type": "response.created",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "status": "in_progress",
+                    "model": model,
+                    "output": [],
+                },
             },
-        })
+        )
 
         # 2. response.output_item.added
-        yield _sse_event("response.output_item.added", {
-            "type": "response.output_item.added",
-            "output_index": item_idx,
-            "item": {
-                "type": "message",
-                "id": msg_id,
-                "role": "assistant",
-                "status": "in_progress",
-                "content": [],
+        yield _sse_event(
+            "response.output_item.added",
+            {
+                "type": "response.output_item.added",
+                "output_index": item_idx,
+                "item": {
+                    "type": "message",
+                    "id": msg_id,
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                },
             },
-        })
+        )
 
         # 3. response.content_part.added
-        yield _sse_event("response.content_part.added", {
-            "type": "response.content_part.added",
-            "item_id": msg_id,
-            "output_index": item_idx,
-            "content_index": content_idx,
-            "part": {"type": "output_text", "text": ""},
-        })
+        yield _sse_event(
+            "response.content_part.added",
+            {
+                "type": "response.content_part.added",
+                "item_id": msg_id,
+                "output_index": item_idx,
+                "content_index": content_idx,
+                "part": {"type": "output_text", "text": ""},
+            },
+        )
 
         # 4. Stream deltas — either from live iterator or chunked text
         accumulated_text = ""
@@ -104,13 +113,16 @@ async def sse_responses_stream_live(
                 if chunk.choices and chunk.choices[0].delta.content:
                     delta = chunk.choices[0].delta.content
                     accumulated_text += delta
-                    yield _sse_event("response.output_text.delta", {
-                        "type": "response.output_text.delta",
-                        "item_id": msg_id,
-                        "output_index": item_idx,
-                        "content_index": content_idx,
-                        "delta": delta,
-                    })
+                    yield _sse_event(
+                        "response.output_text.delta",
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": msg_id,
+                            "output_index": item_idx,
+                            "content_index": content_idx,
+                            "delta": delta,
+                        },
+                    )
                 if chunk.usage:
                     stream_usage = chunk.usage
             full_text = accumulated_text
@@ -126,66 +138,83 @@ async def sse_responses_stream_live(
             text = full_text or ""
             chunk_size = 20
             for i in range(0, len(text), chunk_size):
-                chunk = text[i:i + chunk_size]
-                yield _sse_event("response.output_text.delta", {
-                    "type": "response.output_text.delta",
-                    "item_id": msg_id,
-                    "output_index": item_idx,
-                    "content_index": content_idx,
-                    "delta": chunk,
-                })
+                chunk = text[i : i + chunk_size]
+                yield _sse_event(
+                    "response.output_text.delta",
+                    {
+                        "type": "response.output_text.delta",
+                        "item_id": msg_id,
+                        "output_index": item_idx,
+                        "content_index": content_idx,
+                        "delta": chunk,
+                    },
+                )
             accumulated_text = text
 
         # 5. response.output_text.done
-        yield _sse_event("response.output_text.done", {
-            "type": "response.output_text.done",
-            "item_id": msg_id,
-            "output_index": item_idx,
-            "content_index": content_idx,
-            "text": text,
-        })
+        yield _sse_event(
+            "response.output_text.done",
+            {
+                "type": "response.output_text.done",
+                "item_id": msg_id,
+                "output_index": item_idx,
+                "content_index": content_idx,
+                "text": text,
+            },
+        )
 
         # 6. response.content_part.done
-        yield _sse_event("response.content_part.done", {
-            "type": "response.content_part.done",
-            "item_id": msg_id,
-            "output_index": item_idx,
-            "content_index": content_idx,
-            "part": {"type": "output_text", "text": text},
-        })
+        yield _sse_event(
+            "response.content_part.done",
+            {
+                "type": "response.content_part.done",
+                "item_id": msg_id,
+                "output_index": item_idx,
+                "content_index": content_idx,
+                "part": {"type": "output_text", "text": text},
+            },
+        )
 
         # 7. response.output_item.done
-        yield _sse_event("response.output_item.done", {
-            "type": "response.output_item.done",
-            "output_index": item_idx,
-            "item": {
-                "type": "message",
-                "id": msg_id,
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": text}],
-            },
-        })
-
-        # 8. response.completed
-        yield _sse_event("response.completed", {
-            "type": "response.completed",
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "status": "completed",
-                "model": model,
-                "output": [{
+        yield _sse_event(
+            "response.output_item.done",
+            {
+                "type": "response.output_item.done",
+                "output_index": item_idx,
+                "item": {
                     "type": "message",
                     "id": msg_id,
                     "role": "assistant",
                     "status": "completed",
                     "content": [{"type": "output_text", "text": text}],
-                }],
-                "usage": usage,
-                **({"metadata": metadata} if metadata else {}),
+                },
             },
-        })
+        )
+
+        # 8. response.completed
+        yield _sse_event(
+            "response.completed",
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "status": "completed",
+                    "model": model,
+                    "output": [
+                        {
+                            "type": "message",
+                            "id": msg_id,
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": text}],
+                        }
+                    ],
+                    "usage": usage,
+                    **({"metadata": metadata} if metadata else {}),
+                },
+            },
+        )
 
     return StreamingResponse(
         generate(),

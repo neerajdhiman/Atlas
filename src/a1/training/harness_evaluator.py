@@ -92,7 +92,10 @@ def run_harness_eval(
     eval_results["avg_score"] = round(sum(accuracies) / max(len(accuracies), 1), 4)
     eval_results["improved"] = True  # harness doesn't compare base vs ft, just absolute scores
 
-    log.info(f"Harness eval complete: avg_score={eval_results['avg_score']}, tasks={len(eval_results['tasks'])}")
+    log.info(
+        f"Harness eval complete: avg_score={eval_results['avg_score']}, "
+        f"tasks={len(eval_results['tasks'])}"
+    )
     return eval_results
 
 

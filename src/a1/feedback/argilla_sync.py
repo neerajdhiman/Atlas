@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from a1.common.logging import get_logger
-from a1.db.models import Conversation, DualExecutionRecord, Message, RoutingDecision
+from a1.db.models import Conversation, Message
 from a1.db.repositories import DualExecutionRepo, QualityRepo
 from config.settings import settings
 
@@ -58,7 +58,9 @@ async def export_to_argilla(
             ],
             questions=[
                 rg.RatingQuestion(name="quality", title="Response Quality", values=[1, 2, 3, 4, 5]),
-                rg.TextQuestion(name="correction", title="Corrected Response (optional)", required=False),
+                rg.TextQuestion(
+                    name="correction", title="Corrected Response (optional)", required=False
+                ),
             ],
             metadata=[
                 rg.TermsMetadataProperty(name="message_id", title="Message ID"),
@@ -66,7 +68,9 @@ async def export_to_argilla(
                 rg.TermsMetadataProperty(name="provider", title="Provider"),
             ],
         )
-        dataset = rg.Dataset(name=dataset_name, workspace=settings.argilla_workspace, settings=ds_settings)
+        dataset = rg.Dataset(
+            name=dataset_name, workspace=settings.argilla_workspace, settings=ds_settings
+        )
         dataset.create()
         log.info(f"Created Argilla dataset: {dataset_name}")
 
@@ -213,11 +217,6 @@ async def push_handoff_batch_for_review(
 
     import argilla as rg
 
-    client = rg.Argilla(
-        api_url=settings.argilla_api_url,
-        api_key=settings.argilla_api_key or "admin.apikey",
-    )
-
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
     batch_id = f"a1-handoff-{task_type}-{timestamp}"
 
@@ -260,19 +259,21 @@ async def push_handoff_batch_for_review(
                     user_msg = (m.get("content") or "")[:1000]
                     break
 
-        rg_records.append(rg.Record(
-            fields={
-                "user_message": user_msg or "(no user message)",
-                "teacher_response": (rec.claude_response or "")[:2000],
-                "local_response": (rec.local_response or "")[:2000],
-                "task_type": task_type,
-                "local_model": rec.local_model or "",
-            },
-            metadata={
-                "record_id": str(rec.id),
-                "similarity_score": str(round(rec.similarity_score or 0.0, 3)),
-            },
-        ))
+        rg_records.append(
+            rg.Record(
+                fields={
+                    "user_message": user_msg or "(no user message)",
+                    "teacher_response": (rec.claude_response or "")[:2000],
+                    "local_response": (rec.local_response or "")[:2000],
+                    "task_type": task_type,
+                    "local_model": rec.local_model or "",
+                },
+                metadata={
+                    "record_id": str(rec.id),
+                    "similarity_score": str(round(rec.similarity_score or 0.0, 3)),
+                },
+            )
+        )
 
     if rg_records:
         dataset.records.log(rg_records)
@@ -303,7 +304,13 @@ async def check_handoff_batch_approval(
     """
     if not settings.argilla_api_url:
         # Gate disabled — approve automatically
-        return {"approved": True, "positive_pct": 1.0, "annotated_count": 0, "total_records": 0, "pending": False}
+        return {
+            "approved": True,
+            "positive_pct": 1.0,
+            "annotated_count": 0,
+            "total_records": 0,
+            "pending": False,
+        }
 
     if threshold is None:
         threshold = settings.argilla_approval_threshold
@@ -320,7 +327,13 @@ async def check_handoff_batch_approval(
             dataset = client.datasets(name=batch_id, workspace=settings.argilla_workspace)
         except Exception as e:
             log.warning(f"Argilla batch '{batch_id}' not found: {e}")
-            return {"approved": False, "positive_pct": 0.0, "annotated_count": 0, "total_records": 0, "pending": True}
+            return {
+                "approved": False,
+                "positive_pct": 0.0,
+                "annotated_count": 0,
+                "total_records": 0,
+                "pending": True,
+            }
 
         total = 0
         annotated = 0
@@ -367,7 +380,13 @@ async def check_handoff_batch_approval(
 
     except Exception as e:
         log.error(f"Failed to check Argilla batch approval for '{batch_id}': {e}")
-        return {"approved": False, "positive_pct": 0.0, "annotated_count": 0, "total_records": 0, "pending": True}
+        return {
+            "approved": False,
+            "positive_pct": 0.0,
+            "annotated_count": 0,
+            "total_records": 0,
+            "pending": True,
+        }
 
 
 async def get_argilla_status() -> dict:
@@ -386,10 +405,12 @@ async def get_argilla_status() -> dict:
         # List datasets in workspace
         datasets = []
         for ds in client.datasets:
-            datasets.append({
-                "name": ds.name,
-                "workspace": ds.workspace.name if ds.workspace else "",
-            })
+            datasets.append(
+                {
+                    "name": ds.name,
+                    "workspace": ds.workspace.name if ds.workspace else "",
+                }
+            )
 
         return {
             "connected": True,

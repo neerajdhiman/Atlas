@@ -39,7 +39,11 @@ async def _get_claude_cli_key() -> str | None:
             log.warning("Claude CLI OAuth token expired, attempting refresh via CLI...")
             try:
                 proc = await asyncio.create_subprocess_exec(
-                    "claude", "-p", "test", "--max-turns", "1",
+                    "claude",
+                    "-p",
+                    "test",
+                    "--max-turns",
+                    "1",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
@@ -74,15 +78,22 @@ def _load_provider_models(provider_name: str) -> list[ModelInfo]:
         provider_config = config.get("providers", {}).get(provider_name, {})
         models = []
         for m in provider_config.get("models", []):
-            models.append(ModelInfo(
-                name=m["name"],
-                provider=provider_name,
-                context_window=m.get("context_window", 4096),
-                cost_per_1k_input=m.get("cost_per_1k_input", 0.0),
-                cost_per_1k_output=m.get("cost_per_1k_output", 0.0),
-                supports_tools=m.get("supports_tools", True),
-                supports_streaming=m.get("supports_streaming", True),
-            ))
+            models.append(
+                ModelInfo(
+                    name=m["name"],
+                    provider=provider_name,
+                    context_window=m.get("context_window", 4096),
+                    cost_per_1k_input=m.get("cost_per_1k_input", 0.0),
+                    cost_per_1k_output=m.get("cost_per_1k_output", 0.0),
+                    supports_tools=m.get("supports_tools", True),
+                    supports_streaming=m.get("supports_streaming", True),
+                    supports_vision=m.get("supports_vision", False),
+                    supports_computer_use=m.get("supports_computer_use", False),
+                    max_output_tokens=m.get("max_output_tokens", 4096),
+                    tier=m.get("tier", "standard"),
+                    latency_class=m.get("latency_class", "normal"),
+                )
+            )
         return models
     except Exception as e:
         log.warning(f"Could not load models for {provider_name}: {e}")
@@ -93,7 +104,9 @@ class ProviderRegistry:
     def __init__(self):
         self._providers: dict[str, LLMProvider] = {}
         self._health: dict[str, bool] = {}
-        self._unhealthy_since: dict[str, float | None] = {}  # circuit breaker: epoch seconds when provider first went unhealthy
+        self._unhealthy_since: dict[
+            str, float | None
+        ] = {}  # circuit breaker: epoch seconds when provider first went unhealthy
 
     async def initialize(self):
         """Register all configured providers and check health."""
@@ -104,6 +117,7 @@ class ProviderRegistry:
 
         # Ollama is always registered (local, custom discovery)
         from a1.providers.ollama import OllamaProvider
+
         ollama = OllamaProvider()
         await ollama.discover_models()
         self._providers["ollama"] = ollama
@@ -112,6 +126,7 @@ class ProviderRegistry:
         # Claude CLI proxy (uses local claude command for auth)
         try:
             from a1.providers.claude_cli import ClaudeCLIProvider
+
             claude_cli = ClaudeCLIProvider()
             cli_healthy = await claude_cli.health_check()
             if cli_healthy:
@@ -132,13 +147,16 @@ class ProviderRegistry:
         # Anthropic: always use native SDK (persistent connection pool, true token streaming)
         if settings.anthropic_api_key:
             from a1.providers.anthropic import AnthropicProvider
+
             self._providers["anthropic"] = AnthropicProvider()
             log.info("Registered Anthropic (native SDK)")
 
         if settings.openai_api_key:
             models = _load_provider_models("openai")
             self._providers["openai"] = LiteLLMProvider(
-                name="openai", models=models, api_key=settings.openai_api_key,
+                name="openai",
+                models=models,
+                api_key=settings.openai_api_key,
             )
             log.info(f"Registered OpenAI via LiteLLM ({len(models)} models)")
 
@@ -146,35 +164,53 @@ class ProviderRegistry:
             models = _load_provider_models("groq")
             if not models:
                 models = [
-                    ModelInfo("llama-3.3-70b-versatile", "groq", 128000, 0.0001, 0.0001, True, True),
+                    ModelInfo(
+                        "llama-3.3-70b-versatile", "groq", 128000, 0.0001, 0.0001, True, True
+                    ),
                     ModelInfo("llama-3.1-8b-instant", "groq", 128000, 0.00005, 0.00005, True, True),
                 ]
             self._providers["groq"] = LiteLLMProvider(
-                name="groq", models=models, api_key=settings.groq_api_key,
+                name="groq",
+                models=models,
+                api_key=settings.groq_api_key,
             )
             log.info(f"Registered Groq via LiteLLM ({len(models)} models)")
 
         if settings.vertex_project_id:
             models = _load_provider_models("vertex")
             self._providers["vertex"] = LiteLLMProvider(
-                name="vertex", models=models,
+                name="vertex",
+                models=models,
             )
             log.info(f"Registered Vertex via LiteLLM ({len(models)} models)")
+
+        if settings.moonshot_api_key:
+            models = _load_provider_models("moonshot")
+            self._providers["moonshot"] = LiteLLMProvider(
+                name="moonshot",
+                models=models,
+                api_key=settings.moonshot_api_key,
+                api_base="https://api.moonshot.cn/v1",
+            )
+            log.info(f"Registered Moonshot/Kimi via LiteLLM ({len(models)} models)")
 
     async def _register_native_providers(self):
         """Register native provider implementations (legacy fallback)."""
         if settings.anthropic_api_key:
             from a1.providers.anthropic import AnthropicProvider
+
             self._providers["anthropic"] = AnthropicProvider()
             log.info("Registered Anthropic (native)")
 
         if settings.openai_api_key:
             from a1.providers.openai import OpenAIProvider
+
             self._providers["openai"] = OpenAIProvider()
             log.info("Registered OpenAI (native)")
 
         if settings.vertex_project_id:
             from a1.providers.vertex import VertexProvider
+
             self._providers["vertex"] = VertexProvider()
             log.info("Registered Vertex (native)")
 
@@ -243,12 +279,23 @@ class ProviderRegistry:
             for name, provider in self._providers.items()
         ]
 
+    def get_providers_supporting(self, capability: str) -> list[LLMProvider]:
+        """Return healthy providers that have at least one model with the given capability.
+
+        capability: "vision" | "computer_use" | "tools" | "streaming"
+        """
+        field = f"supports_{capability}"
+        result = []
+        for name, provider in self._providers.items():
+            if not self._health.get(name, False):
+                continue
+            if any(getattr(m, field, False) for m in provider.list_models()):
+                result.append(provider)
+        return result
+
     @property
     def healthy_providers(self) -> dict[str, LLMProvider]:
-        return {
-            name: p for name, p in self._providers.items()
-            if self._health.get(name, False)
-        }
+        return {name: p for name, p in self._providers.items() if self._health.get(name, False)}
 
 
 # Singleton

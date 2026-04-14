@@ -1,5 +1,6 @@
 import time
 import uuid
+
 from pydantic import BaseModel, Field
 
 
@@ -33,6 +34,16 @@ class ChatCompletionResponse(BaseModel):
     provider: str | None = None
     task_type: str | None = None
     routing_strategy: str | None = None
+
+
+class AtlasError(BaseModel):
+    """Standard error response used by all Atlas endpoints."""
+
+    # "provider_error", "validation_error", "auth_error", "internal_error", "rate_limit_error"
+    error: str
+    message: str
+    request_id: str | None = None
+    status_code: int = 500
 
 
 class DeltaMessage(BaseModel):

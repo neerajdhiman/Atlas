@@ -1,7 +1,6 @@
 """Evaluate fine-tuned models against their base versions."""
 
 import json
-import os
 
 from a1.common.logging import get_logger
 
@@ -22,16 +21,21 @@ async def evaluate_model(
 
     import torch
     from peft import PeftModel
+
     from config.settings import settings
 
     if settings.use_unsloth:
         # Faster model loading via Unsloth
         from unsloth import FastLanguageModel
+
         base, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=base_model, load_in_4bit=True, max_seq_length=2048,
+            model_name=base_model,
+            load_in_4bit=True,
+            max_seq_length=2048,
         )
     else:
         from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
         tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -41,7 +45,10 @@ async def evaluate_model(
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
         base = AutoModelForCausalLM.from_pretrained(
-            base_model, quantization_config=bnb_config, device_map="auto", trust_remote_code=True,
+            base_model,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True,
         )
 
     if tokenizer.pad_token is None:
@@ -75,12 +82,11 @@ async def evaluate_model(
         if not expected or not prompt_msgs:
             continue
 
-        prompt_text = tokenizer.apply_chat_template(prompt_msgs, tokenize=False, add_generation_prompt=True)
+        prompt_text = tokenizer.apply_chat_template(
+            prompt_msgs, tokenize=False, add_generation_prompt=True
+        )
         inputs = tokenizer(prompt_text, return_tensors="pt", truncation=True, max_length=1024)
         inputs = {k: v.to(base.device) for k, v in inputs.items()}
-
-        # Score: perplexity of expected output
-        target_ids = tokenizer(expected, return_tensors="pt", truncation=True, max_length=512)["input_ids"]
 
         with torch.no_grad():
             base_out = base(**inputs, labels=inputs["input_ids"])
@@ -102,5 +108,8 @@ async def evaluate_model(
         "improvement": round(improvement, 4),
         "improved": improvement > 0,
     }
-    log.info(f"Eval results: base_loss={avg_base_loss:.4f}, ft_loss={avg_ft_loss:.4f}, improvement={improvement:.2%}")
+    log.info(
+        f"Eval results: base_loss={avg_base_loss:.4f}, ft_loss={avg_ft_loss:.4f}, "
+        f"improvement={improvement:.2%}"
+    )
     return results

@@ -1,5 +1,4 @@
 import uuid
-import time
 from collections.abc import AsyncIterator
 
 import anthropic
@@ -41,11 +40,13 @@ class AnthropicProvider(LLMProvider):
     def _translate_tools(self, tools: list) -> list[dict]:
         result = []
         for t in tools:
-            result.append({
-                "name": t.function.name,
-                "description": t.function.description or "",
-                "input_schema": t.function.parameters or {"type": "object", "properties": {}},
-            })
+            result.append(
+                {
+                    "name": t.function.name,
+                    "description": t.function.description or "",
+                    "input_schema": t.function.parameters or {"type": "object", "properties": {}},
+                }
+            )
         return result
 
     async def complete(self, request: ChatCompletionRequest) -> ChatCompletionResponse:
@@ -73,11 +74,13 @@ class AnthropicProvider(LLMProvider):
             elif block.type == "tool_use":
                 if tool_calls is None:
                     tool_calls = []
-                tool_calls.append({
-                    "id": block.id,
-                    "type": "function",
-                    "function": {"name": block.name, "arguments": str(block.input)},
-                })
+                tool_calls.append(
+                    {
+                        "id": block.id,
+                        "type": "function",
+                        "function": {"name": block.name, "arguments": str(block.input)},
+                    }
+                )
 
         return ChatCompletionResponse(
             model=request.model,

@@ -1,7 +1,6 @@
 """Fallback chain logic for retrying failed requests with alternative models."""
 
 from a1.common.logging import get_logger
-from a1.providers.base import LLMProvider
 from a1.providers.registry import provider_registry
 from a1.proxy.request_models import ChatCompletionRequest
 from a1.proxy.response_models import ChatCompletionResponse

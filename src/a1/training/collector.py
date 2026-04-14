@@ -1,6 +1,6 @@
 """Collect high-quality training samples from conversations."""
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 

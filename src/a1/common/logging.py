@@ -1,18 +1,60 @@
+import json
 import logging
+import os
 import sys
+
+
+class JSONFormatter(logging.Formatter):
+    """Structured JSON log formatter for production."""
+
+    def format(self, record):
+        log_entry = {
+            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        # Include request_id if available
+        try:
+            from a1.proxy.core_pipeline import request_id_var
+
+            rid = request_id_var.get("")
+            if rid:
+                log_entry["request_id"] = rid
+        except Exception:
+            pass
+        if record.exc_info and record.exc_info[1]:
+            log_entry["error"] = str(record.exc_info[1])
+        return json.dumps(log_entry, default=str)
 
 
 def setup_logging(debug: bool = False) -> None:
     level = logging.DEBUG if debug else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        stream=sys.stdout,
-    )
+    log_format = os.environ.get("A1_LOG_FORMAT", "text")
+
+    root = logging.getLogger()
+    root.setLevel(level)
+
+    # Clear existing handlers
+    root.handlers.clear()
+
+    handler = logging.StreamHandler(sys.stdout)
+    if log_format == "json":
+        handler.setFormatter(JSONFormatter())
+    else:
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+    root.addHandler(handler)
+
     # Quiet noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("ollama").setLevel(logging.WARNING)
     logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING if not debug else logging.INFO)
 
 

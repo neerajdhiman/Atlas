@@ -1,6 +1,5 @@
 """Unit tests for PII masker — each pattern masks and unmasks correctly."""
 
-import pytest
 from a1.security.pii_masker import PIIMasker
 
 
@@ -23,7 +22,10 @@ def test_email_masked():
 
 
 def test_email_unmasked():
-    assert roundtrip("Contact john@example.com for help", "email") == "Contact john@example.com for help"
+    assert (
+        roundtrip("Contact john@example.com for help", "email")
+        == "Contact john@example.com for help"
+    )
 
 
 def test_email_multiple():

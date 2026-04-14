@@ -1,23 +1,29 @@
 """Smoke tests: all 3 proxy endpoints return 200 (mocked providers)."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Shared mock helpers
 # ---------------------------------------------------------------------------
 
+
 def _mock_completion_response():
     """Return a minimal ChatCompletionResponse mock."""
     from a1.proxy.response_models import ChatCompletionResponse, Choice, ChoiceMessage, Usage
+
     return ChatCompletionResponse(
         id="chatcmpl-test",
         model="test-model",
-        choices=[Choice(index=0, message=ChoiceMessage(role="assistant", content="Hello!"),
-                        finish_reason="stop")],
+        choices=[
+            Choice(
+                index=0,
+                message=ChoiceMessage(role="assistant", content="Hello!"),
+                finish_reason="stop",
+            )
+        ],
         usage=Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         provider="mock",
     )
@@ -37,6 +43,7 @@ def _mock_provider():
 # App fixture
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def client():
     """TestClient with mocked providers, DB, and auth."""
@@ -46,6 +53,7 @@ def client():
     mock_registry.get_provider_for_model.return_value = mock_provider
     mock_registry.healthy_providers = {"mock": mock_provider}
     mock_registry.list_all_models.return_value = []
+    mock_registry.list_providers.return_value = []
 
     async def mock_get_db():
         yield MagicMock()
@@ -53,27 +61,30 @@ def client():
     async def mock_select_model(task_type, strategy):
         return "test-model", "mock"
 
+    # After CorePipeline refactor, provider_registry and select_model
+    # are imported in core_pipeline.py, not individual routers.
     with (
-        patch("a1.proxy.openai_router.provider_registry", mock_registry),
-        patch("a1.proxy.responses_router.provider_registry", mock_registry),
-        patch("a1.proxy.atlas_router.provider_registry", mock_registry),
-        patch("a1.proxy.openai_router.select_model", mock_select_model),
-        patch("a1.proxy.responses_router.select_model", mock_select_model),
-        patch("a1.proxy.atlas_router.select_model", mock_select_model),
+        patch("a1.proxy.core_pipeline.provider_registry", mock_registry),
+        patch("a1.proxy.core_pipeline.select_model", mock_select_model),
+        patch("a1.proxy.core_pipeline.settings") as mock_settings,
+        patch("a1.proxy.core_pipeline._persist_usage", new_callable=AsyncMock),
+        patch("a1.proxy.core_pipeline.metrics"),
+        patch("a1.proxy.core_pipeline.record_otel_request"),
         patch("a1.proxy.openai_router.verify_api_key", return_value="dev"),
+        patch("a1.proxy.openai_router.provider_registry", mock_registry),
         patch("a1.proxy.responses_router.verify_api_key", return_value="dev"),
         patch("a1.proxy.atlas_router.verify_api_key", return_value="dev"),
         patch("a1.proxy.openai_router.get_db", mock_get_db),
         patch("a1.proxy.responses_router.get_db", mock_get_db),
-        patch("a1.proxy.pipeline.settings") as mock_settings,
-        patch("config.settings.settings") as _,
     ):
         mock_settings.session_enabled = False
         mock_settings.pii_masking_enabled = False
         mock_settings.distillation_enabled = False
-        mock_settings.distillation_min_samples = 100
+        mock_settings.task_cache_enabled = False
+        mock_settings.session_load_grace_ms = 100
 
         from a1.app import create_app
+
         app = create_app()
         with TestClient(app, raise_server_exceptions=False) as c:
             yield c
@@ -82,6 +93,7 @@ def client():
 # ---------------------------------------------------------------------------
 # Smoke tests
 # ---------------------------------------------------------------------------
+
 
 def test_chat_completions_returns_200(client):
     resp = client.post(

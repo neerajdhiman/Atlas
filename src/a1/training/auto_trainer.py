@@ -7,25 +7,19 @@ Gradually shifts traffic to local models as they improve.
 """
 
 import asyncio
-import json
 import random
 import time
-import uuid
-from datetime import datetime, timezone
 
 from fastapi import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from a1.common.logging import get_logger
 from a1.common.metrics import metrics
-from a1.common.tokens import count_tokens_for_model, count_messages_tokens_for_model
+from a1.common.tz import now_ist
 from a1.providers.registry import provider_registry
 from a1.proxy.request_models import ChatCompletionRequest
 from a1.proxy.response_models import (
     ChatCompletionResponse,
-    Choice,
-    ChoiceMessage,
-    Usage,
 )
 from config.settings import settings
 
@@ -40,50 +34,59 @@ _ATLAS_BASE_IDENTITY = (
 )
 
 
-# P1-5: Per-Atlas-model external provider preference order.
-# First healthy registered provider in the list wins.
-_ATLAS_PROVIDER_PREFERENCE: dict[str, list[str]] = {
-    "atlas-plan":   ["groq", "anthropic", "claude-cli", "openai"],
-    "atlas-code":   ["groq", "anthropic", "claude-cli", "openai"],
-    "atlas-secure": ["anthropic", "claude-cli", "groq", "openai"],
-    "atlas-infra":  ["anthropic", "claude-cli", "groq", "openai"],
-    "atlas-data":   ["openai", "groq", "anthropic", "claude-cli"],
-    "atlas-books":  ["openai", "groq", "anthropic", "claude-cli"],
-    "atlas-audit":  ["openai", "anthropic", "claude-cli", "groq"],
-}
+# Atlas provider preferences loaded from providers.yaml (single source of truth).
+# Cached at module level after first load.
+_atlas_provider_cache: dict[str, dict] | None = None
 
-# Default model to use for each provider when serving Atlas requests.
-# None means fall back to settings.distillation_claude_model.
-_PROVIDER_DEFAULT_MODELS: dict[str, str | None] = {
-    "groq":       "llama-3.3-70b-versatile",   # <200ms TTFT target
-    "anthropic":  "claude-sonnet-4-20250514",
-    "claude-cli": None,                         # uses distillation_claude_model setting
-    "openai":     "gpt-4o-mini",
-}
+
+def _load_atlas_provider_config() -> dict[str, dict]:
+    """Load Atlas model provider_preference and provider_models from providers.yaml."""
+    global _atlas_provider_cache
+    if _atlas_provider_cache is not None:
+        return _atlas_provider_cache
+    try:
+        import yaml
+
+        with open("config/providers.yaml") as f:
+            cfg = yaml.safe_load(f)
+        atlas_models = cfg.get("providers", {}).get("atlas", {}).get("models", [])
+        _atlas_provider_cache = {
+            m["name"]: {
+                "preference": m.get(
+                    "provider_preference", ["anthropic", "claude-cli", "groq", "openai"]
+                ),
+                "models": m.get("provider_models", {}),
+            }
+            for m in atlas_models
+        }
+    except Exception as e:
+        log.warning(f"Could not load Atlas provider config from providers.yaml: {e}")
+        _atlas_provider_cache = {}
+    return _atlas_provider_cache
 
 
 def _get_external_provider(atlas_model: str = ""):
     """Return (provider, provider_name, model) for the given Atlas model.
 
-    Walks the per-atlas-model provider preference list and returns the first
-    healthy, registered provider. Falls back to anthropic → claude-cli if
-    no atlas_model-specific preference matches.
+    Reads provider_preference and provider_models from providers.yaml.
+    Falls back to anthropic → claude-cli if nothing matches.
     Returns (None, None, None) if nothing is available.
     """
-    preference = _ATLAS_PROVIDER_PREFERENCE.get(
-        atlas_model,
-        ["anthropic", "claude-cli", "groq", "openai"],
-    )
+    cfg = _load_atlas_provider_config()
+    model_cfg = cfg.get(atlas_model, {})
+    preference = model_cfg.get("preference", ["anthropic", "claude-cli", "groq", "openai"])
+    provider_models = model_cfg.get("models", {})
+
     for provider_name in preference:
         p = provider_registry.get_provider(provider_name)
         if p and provider_registry.is_healthy(provider_name):
-            model = _PROVIDER_DEFAULT_MODELS.get(provider_name) or settings.distillation_claude_model
+            model = provider_models.get(provider_name) or settings.distillation_claude_model
             return p, provider_name, model
-    # Final fallback: accept any registered provider even if health unknown
+    # Final fallback: any registered provider even if health unknown
     for provider_name in ["anthropic", "claude-cli"]:
         p = provider_registry.get_provider(provider_name)
         if p:
-            model = _PROVIDER_DEFAULT_MODELS.get(provider_name) or settings.distillation_claude_model
+            model = provider_models.get(provider_name) or settings.distillation_claude_model
             return p, provider_name, model
     return None, None, None
 
@@ -114,39 +117,123 @@ def _inject_atlas_identity(request, atlas_model: str) -> None:
         request.messages.insert(0, MessageInput(role="system", content=atlas_system))
 
 
-async def _run_local_model(task_type: str, messages_dicts: list[dict]) -> dict:
-    """Run the best local Ollama model for a task type and return result dict.
+_DISTILL_TIMEOUT = 30  # seconds — skip if local model is too slow
+_DISTILL_MAX_INPUT = 2000  # chars — truncate long prompts for local
+# Prefer fastest local models for distillation comparison
+_DISTILL_MODEL_PREFERENCE = [
+    "gemma4:12b",  # best general quality, server 2 (10.0.0.10)
+    "llama3.2:latest",  # fastest, server 1 (10.0.0.9)
+    "mistral:7b",  # server 2
+    "deepseek-coder:6.7b",  # code tasks, server 1
+]
 
-    Used for parallel dual execution — started as a background task before
-    the external provider call so both run concurrently.
+
+async def _run_local_model(
+    task_type: str,
+    messages_dicts: list[dict],
+) -> dict:
+    """Run a fast local model for distillation comparison.
+
+    Optimized for speed over quality:
+    - Uses fastest available model (not best_quality)
+    - Truncates long prompts to reduce inference time
+    - Hard 30s timeout to avoid GPU hogging
+    - Only sends last user message (not full history)
     """
-    from a1.routing.strategy import select_model
-    from a1.proxy.request_models import ChatCompletionRequest, MessageInput
+    from a1.proxy.request_models import (
+        ChatCompletionRequest,
+        MessageInput,
+    )
 
-    local_model_name, local_provider_name = await select_model(task_type, "best_quality")
-    local_provider = provider_registry.get_provider(local_provider_name)
+    local_provider = provider_registry.get_provider("ollama")
+    if not local_provider:
+        return {
+            "text": None,
+            "latency_ms": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "model": None,
+        }
 
-    if not local_provider or local_provider_name != "ollama":
-        return {"text": None, "latency_ms": 0, "prompt_tokens": 0, "completion_tokens": 0, "model": None}
+    # Pick fastest available model
+    local_model_name = None
+    for pref in _DISTILL_MODEL_PREFERENCE:
+        if local_provider.supports_model(pref):
+            local_model_name = pref
+            break
+    if not local_model_name:
+        models = local_provider.list_models()
+        local_model_name = models[0].name if models else "llama3.2:latest"
 
-    local_messages = [
-        MessageInput(role=m["role"], content=m.get("content", ""))
-        for m in messages_dicts
-    ]
-    local_req = ChatCompletionRequest(model=local_model_name, messages=local_messages, max_tokens=1000)
+    # Only send system + last user message (not full
+    # history) to keep inference fast
+    sys_msg = next(
+        (m for m in messages_dicts if m["role"] == "system"),
+        None,
+    )
+    last_user = None
+    for m in reversed(messages_dicts):
+        if m["role"] == "user":
+            last_user = m
+            break
+
+    local_messages = []
+    if sys_msg:
+        # Truncate system prompt for local model
+        content = sys_msg.get("content", "") or ""
+        local_messages.append(
+            MessageInput(
+                role="system",
+                content=content[:_DISTILL_MAX_INPUT],
+            )
+        )
+    if last_user:
+        content = last_user.get("content", "") or ""
+        local_messages.append(
+            MessageInput(
+                role="user",
+                content=content[:_DISTILL_MAX_INPUT],
+            )
+        )
+    else:
+        local_messages.append(MessageInput(role="user", content="Hello"))
+
+    local_req = ChatCompletionRequest(
+        model=local_model_name,
+        messages=local_messages,
+        max_tokens=500,  # short response for comparison
+    )
     start = time.time()
     try:
-        local_result = await local_provider.complete(local_req)
+        local_result = await asyncio.wait_for(
+            local_provider.complete(local_req),
+            timeout=_DISTILL_TIMEOUT,
+        )
         return {
-            "text": local_result.choices[0].message.content if local_result.choices else "",
+            "text": (local_result.choices[0].message.content if local_result.choices else ""),
             "latency_ms": int((time.time() - start) * 1000),
             "prompt_tokens": local_result.usage.prompt_tokens,
-            "completion_tokens": local_result.usage.completion_tokens,
+            "completion_tokens": (local_result.usage.completion_tokens),
+            "model": local_model_name,
+        }
+    except asyncio.TimeoutError:
+        log.warning(f"Local model {local_model_name} timed out after {_DISTILL_TIMEOUT}s, skipping")
+        return {
+            "text": None,
+            "latency_ms": int((time.time() - start) * 1000),
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
             "model": local_model_name,
         }
     except Exception as e:
         log.warning(f"Local model run failed for {local_model_name}: {e}")
-        return {"text": None, "latency_ms": int((time.time() - start) * 1000), "prompt_tokens": 0, "completion_tokens": 0, "model": local_model_name}
+        return {
+            "text": None,
+            "latency_ms": int((time.time() - start) * 1000),
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "model": local_model_name,
+        }
 
 
 # In-memory cache of handoff percentages (refreshed from DB periodically)
@@ -161,10 +248,17 @@ async def _refresh_handoff_cache():
     try:
         from a1.db.engine import async_session
         from a1.db.repositories import TaskTypeReadinessRepo
+
         async with async_session() as session:
             repo = TaskTypeReadinessRepo(session)
             records = await repo.list_all()
             _handoff_cache = {r.task_type: r.local_handoff_pct for r in records}
+            # Also cache sample counts and lifecycle state for throttling/routing
+            for r in records:
+                _handoff_cache[f"_count_{r.task_type}"] = r.claude_samples or 0
+                _handoff_cache[f"_lifecycle_{r.task_type}"] = getattr(
+                    r, "lifecycle_state", "learning"
+                )
             _handoff_cache_ts = time.time()
     except Exception as e:
         log.warning(f"Failed to refresh handoff cache: {e}")
@@ -184,6 +278,42 @@ async def should_use_local(task_type: str) -> bool:
     if handoff_pct <= 0:
         return False
     return random.random() < handoff_pct
+
+
+def _transition_lifecycle(readiness, new_pct: float, improvement: float = 0.0):
+    """Advance the lifecycle state machine based on current metrics.
+
+    LEARNING → CANARY: first time handoff_pct > 0 (model has been trained and evaluated)
+    CANARY → GRADUATED: handoff_pct >= 50% (sustained quality in canary)
+    Any → LEARNING: regression detected (quality drops, rollback)
+    """
+    state = getattr(readiness, "lifecycle_state", "learning")
+
+    if state == "learning" and new_pct > 0:
+        readiness.lifecycle_state = "canary"
+        readiness.canary_started_at = now_ist()
+        log.info(
+            f"[lifecycle] {readiness.task_type}: LEARNING → CANARY (first handoff at {new_pct:.0%})"
+        )
+
+    elif state == "canary" and new_pct >= 0.5:
+        readiness.lifecycle_state = "graduated"
+        readiness.graduated_at = now_ist()
+        log.info(
+            f"[lifecycle] {readiness.task_type}: CANARY → GRADUATED (handoff at {new_pct:.0%})"
+        )
+
+    elif state in ("canary", "graduated") and improvement < -0.1:
+        # Regression: quality degraded by >10%
+        readiness.lifecycle_state = "learning"
+        readiness.local_handoff_pct = 0.0
+        readiness.last_regression_at = now_ist()
+        readiness.canary_started_at = None
+        readiness.graduated_at = None
+        log.warning(
+            f"[lifecycle] {readiness.task_type}: {state.upper()} → LEARNING "
+            f"(regression: improvement={improvement:.1%})"
+        )
 
 
 async def handle_dual_execution(
@@ -219,9 +349,23 @@ async def handle_dual_execution(
 
     # P0: start local model concurrently if parallel execution is enabled.
     # User response time = external latency only (local runs in background).
+    # Throttle: only run comparison on 1-in-N requests when we already
+    # have enough samples (saves GPU for actual serving).
     local_task = None
     if settings.parallel_dual_execution:
-        local_task = asyncio.create_task(_run_local_model(task_type, messages_dicts))
+        sample_count = _handoff_cache.get(f"_count_{task_type}", 0)
+        # Every request if < 50 samples, 1-in-3 if 50-100,
+        # 1-in-10 after 100
+        if sample_count < 50:
+            run_local = True
+        elif sample_count < 100:
+            run_local = random.random() < 0.33
+        else:
+            run_local = random.random() < 0.10
+        if run_local:
+            local_task = asyncio.create_task(_run_local_model(task_type, messages_dicts))
+        else:
+            log.debug(f"Skipping local comparison for {task_type} ({sample_count} samples)")
 
     try:
         result = await external_provider.complete(request)
@@ -250,28 +394,43 @@ async def handle_dual_execution(
         result.usage.prompt_tokens, result.usage.completion_tokens, external_model
     )
     metrics.record_request(
-        provider_name, external_model, task_type, latency_ms, cost,
-        result.usage.prompt_tokens, result.usage.completion_tokens, is_local=False,
+        provider_name,
+        external_model,
+        task_type,
+        latency_ms,
+        cost,
+        result.usage.prompt_tokens,
+        result.usage.completion_tokens,
+        is_local=False,
     )
 
     try:
         from a1.db.engine import async_session as _usage_session
         from a1.db.models import UsageRecord
+
         async with _usage_session() as session:
             async with session.begin():
-                session.add(UsageRecord(
-                    provider=provider_name, model=external_model, is_local=False,
-                    prompt_tokens=result.usage.prompt_tokens,
-                    completion_tokens=result.usage.completion_tokens,
-                    cost_usd=cost, equivalent_external_cost_usd=0,
-                    latency_ms=latency_ms, error=False, cache_hit=False,
-                ))
+                session.add(
+                    UsageRecord(
+                        provider=provider_name,
+                        model=external_model,
+                        is_local=False,
+                        prompt_tokens=result.usage.prompt_tokens,
+                        completion_tokens=result.usage.completion_tokens,
+                        cost_usd=cost,
+                        equivalent_external_cost_usd=0,
+                        latency_ms=latency_ms,
+                        error=False,
+                        cache_hit=False,
+                    )
+                )
     except Exception as e:
         log.warning(f"Failed to persist usage: {e}")
 
     try:
         from a1.db.engine import async_session as _async_session
         from a1.db.repositories import ConversationRepo, MessageRepo, RoutingRepo
+
         async with _async_session() as db_session:
             async with db_session.begin():
                 conv_repo = ConversationRepo(db_session)
@@ -286,12 +445,16 @@ async def handle_dual_execution(
                 assistant_msg = await msg_repo.add(conv.id, "assistant", external_text[:2000], seq)
                 await routing_repo.record(
                     message_id=assistant_msg.id,
-                    provider=provider_name, model=external_model, strategy="distillation",
-                    task_type=task_type, confidence=confidence,
+                    provider=provider_name,
+                    model=external_model,
+                    strategy="distillation",
+                    task_type=task_type,
+                    confidence=confidence,
                     latency_ms=latency_ms,
                     prompt_tokens=result.usage.prompt_tokens,
                     completion_tokens=result.usage.completion_tokens,
-                    cost_usd=cost, is_local=False,
+                    cost_usd=cost,
+                    is_local=False,
                 )
     except Exception as e:
         log.warning(f"Failed to persist distillation conversation: {e}")
@@ -299,16 +462,18 @@ async def handle_dual_execution(
     # Background: compare external vs local and collect training data.
     # local_task is already running in parallel (started above); pass it through
     # so _background_local_comparison awaits it instead of re-running local model.
-    asyncio.create_task(_background_local_comparison(
-        messages_dicts=messages_dicts,
-        claude_response_text=external_text,
-        claude_model=external_model,
-        task_type=task_type,
-        claude_latency_ms=latency_ms,
-        claude_prompt_tokens=result.usage.prompt_tokens,
-        claude_completion_tokens=result.usage.completion_tokens,
-        local_task=local_task,
-    ))
+    asyncio.create_task(
+        _background_local_comparison(
+            messages_dicts=messages_dicts,
+            claude_response_text=external_text,
+            claude_model=external_model,
+            task_type=task_type,
+            claude_latency_ms=latency_ms,
+            claude_prompt_tokens=result.usage.prompt_tokens,
+            claude_completion_tokens=result.usage.completion_tokens,
+            local_task=local_task,
+        )
+    )
 
     request.model = original_model
     return result
@@ -338,10 +503,18 @@ async def handle_dual_execution_stream(
     messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
     start_time = time.time()
 
-    # P0: fire local model concurrently before stream starts
+    # P0: fire local model concurrently (throttled)
     local_task = None
     if settings.parallel_dual_execution:
-        local_task = asyncio.create_task(_run_local_model(task_type, messages_dicts))
+        sample_count = _handoff_cache.get(f"_count_{task_type}", 0)
+        if sample_count < 50:
+            run_local = True
+        elif sample_count < 100:
+            run_local = random.random() < 0.33
+        else:
+            run_local = random.random() < 0.10
+        if run_local:
+            local_task = asyncio.create_task(_run_local_model(task_type, messages_dicts))
 
     try:
         raw_iter = external_provider.stream(request)
@@ -368,16 +541,18 @@ async def handle_dual_execution_stream(
         finally:
             latency_ms = int((time.time() - start_time) * 1000)
             if full_text:
-                asyncio.create_task(_background_local_comparison(
-                    messages_dicts=messages_dicts,
-                    claude_response_text=full_text,
-                    claude_model=external_model,
-                    task_type=task_type,
-                    claude_latency_ms=latency_ms,
-                    claude_prompt_tokens=prompt_tokens,
-                    claude_completion_tokens=completion_tokens,
-                    local_task=local_task,
-                ))
+                asyncio.create_task(
+                    _background_local_comparison(
+                        messages_dicts=messages_dicts,
+                        claude_response_text=full_text,
+                        claude_model=external_model,
+                        task_type=task_type,
+                        claude_latency_ms=latency_ms,
+                        claude_prompt_tokens=prompt_tokens,
+                        claude_completion_tokens=completion_tokens,
+                        local_task=local_task,
+                    )
+                )
 
     return _wrapped_stream()
 
@@ -424,7 +599,10 @@ async def _background_local_comparison(
             local_provider = provider_registry.get_provider(local_provider_name)
 
             if local_provider and local_provider_name == "ollama":
-                local_messages = [MessageInput(role=m["role"], content=m.get("content", "")) for m in messages_dicts]
+                local_messages = [
+                    MessageInput(role=m["role"], content=m.get("content", ""))
+                    for m in messages_dicts
+                ]
                 local_req = ChatCompletionRequest(
                     model=local_model_name,
                     messages=local_messages,
@@ -434,7 +612,9 @@ async def _background_local_comparison(
                 try:
                     local_result = await local_provider.complete(local_req)
                     local_latency = int((time.time() - start) * 1000)
-                    local_text = local_result.choices[0].message.content if local_result.choices else ""
+                    local_text = (
+                        local_result.choices[0].message.content if local_result.choices else ""
+                    )
                     local_prompt_tokens = local_result.usage.prompt_tokens
                     local_completion_tokens = local_result.usage.completion_tokens
                 except Exception as e:
@@ -468,7 +648,9 @@ async def _background_local_comparison(
                         local_prompt_tokens=local_prompt_tokens if local_text else None,
                         local_completion_tokens=local_completion_tokens if local_text else None,
                         similarity_score=similarity if local_text else None,
-                        quality_score=similarity if local_text else None,  # derived from Jaccard (fix 2.7)
+                        quality_score=similarity
+                        if local_text
+                        else None,  # derived from Jaccard (fix 2.7)
                     )
 
                     # Increment sample count
@@ -491,15 +673,81 @@ async def _background_local_comparison(
         log.error(f"Background local comparison error: {e}")
 
 
-_STOPWORDS = frozenset({
-    "a", "an", "the", "is", "it", "in", "on", "at", "to", "of", "and", "or",
-    "for", "with", "this", "that", "was", "be", "are", "i", "you", "we", "he",
-    "she", "they", "as", "by", "from", "but", "not", "so", "if", "do", "did",
-    "has", "have", "had", "can", "will", "would", "could", "should", "may",
-    "might", "its", "their", "our", "your", "his", "her", "my", "what", "how",
-    "when", "where", "which", "who", "all", "more", "also", "just", "than",
-    "then", "there", "these", "those", "been", "into", "out", "up", "about",
-})
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "is",
+        "it",
+        "in",
+        "on",
+        "at",
+        "to",
+        "of",
+        "and",
+        "or",
+        "for",
+        "with",
+        "this",
+        "that",
+        "was",
+        "be",
+        "are",
+        "i",
+        "you",
+        "we",
+        "he",
+        "she",
+        "they",
+        "as",
+        "by",
+        "from",
+        "but",
+        "not",
+        "so",
+        "if",
+        "do",
+        "did",
+        "has",
+        "have",
+        "had",
+        "can",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "its",
+        "their",
+        "our",
+        "your",
+        "his",
+        "her",
+        "my",
+        "what",
+        "how",
+        "when",
+        "where",
+        "which",
+        "who",
+        "all",
+        "more",
+        "also",
+        "just",
+        "than",
+        "then",
+        "there",
+        "these",
+        "those",
+        "been",
+        "into",
+        "out",
+        "up",
+        "about",
+    }
+)
 
 
 def _lcs_length(words_a: list[str], words_b: list[str]) -> int:
@@ -570,19 +818,26 @@ async def _check_and_trigger_training(session: AsyncSession, task_type: str, sam
 
     # Check if training is already running
     from a1.db.repositories import TrainingRepo
+
     repo = TrainingRepo(session)
     runs = await repo.list_runs(limit=5)
     for run in runs:
-        if run.status in ("pending", "running") and run.config and run.config.get("task_type") == task_type:
+        if (
+            run.status in ("pending", "running")
+            and run.config
+            and run.config.get("task_type") == task_type
+        ):
             return  # Already training for this task type
 
     # Check if we've trained recently (within 1 hour)
     from a1.db.repositories import TaskTypeReadinessRepo
+
     readiness_repo = TaskTypeReadinessRepo(session)
     readiness = await readiness_repo.get_or_create(task_type)
     if readiness.last_evaluated_at:
         from datetime import timedelta
-        if datetime.now(timezone.utc) - readiness.last_evaluated_at < timedelta(hours=1):
+
+        if now_ist() - readiness.last_evaluated_at < timedelta(hours=1):
             return  # Trained recently
 
     # Trigger training!
@@ -590,6 +845,7 @@ async def _check_and_trigger_training(session: AsyncSession, task_type: str, sam
 
     # Mark the records being included in this training batch (fix 2.7)
     from a1.db.repositories import DualExecutionRepo
+
     dual_repo = DualExecutionRepo(session)
     training_records = await dual_repo.get_unused_for_training(task_type, limit=sample_count)
     for rec in training_records:
@@ -608,11 +864,12 @@ async def _check_and_trigger_training(session: AsyncSession, task_type: str, sam
         dataset_size=sample_count,
         config=config,
     )
-    readiness.last_evaluated_at = datetime.now(timezone.utc)
+    readiness.last_evaluated_at = now_ist()
     readiness.last_training_run_id = str(run.id)
 
     log.info(f"Training run created: {run.id} for {task_type}")
     from a1.dependencies import get_arq_pool
+
     arq_pool = await get_arq_pool()
     await arq_pool.enqueue_job("run_training_pipeline", str(run.id))
     log.info(f"Training job dispatched to ARQ: run_id={run.id}")
@@ -644,6 +901,7 @@ async def update_handoff_after_training(task_type: str, eval_results: dict):
                     if settings.argilla_handoff_gate_enabled and settings.argilla_api_url:
                         # Don't increment yet — queue for human review
                         from a1.feedback.argilla_sync import push_handoff_batch_for_review
+
                         batch_id = await push_handoff_batch_for_review(session, task_type)
                         readiness.argilla_review_status = "pending_argilla_review"
                         readiness.argilla_batch_id = batch_id
@@ -658,17 +916,25 @@ async def update_handoff_after_training(task_type: str, eval_results: dict):
                         return
 
                     # Gate disabled — apply increment directly
-                    cap = getattr(readiness, "max_local_pct", None) or settings.distillation_max_handoff_pct
+                    cap = (
+                        getattr(readiness, "max_local_pct", None)
+                        or settings.distillation_max_handoff_pct
+                    )
+                    old_pct = readiness.local_handoff_pct
                     new_pct = min(
-                        readiness.local_handoff_pct + settings.distillation_handoff_increment,
+                        old_pct + settings.distillation_handoff_increment,
                         cap,
                     )
                     readiness.local_handoff_pct = new_pct
                     readiness.local_avg_quality = eval_results.get("avg_finetuned_loss", 0.0)
+
+                    # P3: Lifecycle state transitions
+                    _transition_lifecycle(readiness, new_pct, improvement)
+
                     log.info(
                         f"Handoff increased for {task_type}: "
-                        f"{readiness.local_handoff_pct:.0%} → {new_pct:.0%} "
-                        f"(improvement: {improvement:.1%})"
+                        f"{old_pct:.0%} → {new_pct:.0%} "
+                        f"(improvement: {improvement:.1%}, lifecycle: {readiness.lifecycle_state})"
                     )
                 else:
                     log.info(
@@ -710,12 +976,16 @@ async def check_and_apply_argilla_approvals():
                     if result["pending"]:
                         log.info(
                             f"Argilla review pending for {readiness.task_type}: "
-                            f"{result['annotated_count']}/{result['total_records']} annotated so far"
+                            f"{result['annotated_count']}/{result['total_records']}"
+                            " annotated so far"
                         )
                         continue
 
                     if result["approved"]:
-                        cap = getattr(readiness, "max_local_pct", None) or settings.distillation_max_handoff_pct
+                        cap = (
+                            getattr(readiness, "max_local_pct", None)
+                            or settings.distillation_max_handoff_pct
+                        )
                         old_pct = readiness.local_handoff_pct
                         new_pct = min(old_pct + settings.distillation_handoff_increment, cap)
                         readiness.local_handoff_pct = new_pct
